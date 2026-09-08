@@ -1,0 +1,81 @@
+# =============================================================================
+#  LE BERCAIL — environnement complet
+#
+#  Démarrage :
+#     docker compose up -d
+#     docker compose exec backend npx prisma migrate deploy
+#     docker compose exec backend npm run seed
+#
+#  Pour ne lancer que les dépendances (développement en local) :
+#     docker compose up -d postgres redis
+# =============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: bercail-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bercail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bercail}
+      POSTGRES_DB: ${POSTGRES_DB:-bercail}
+      # Le tri français change l'ordre des résultats : on le fixe.
+      LANG: fr_FR.utf8
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-bercail} -d ${POSTGRES_DB:-bercail}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: bercail-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      target: runtime
+    container_name: bercail-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      API_PREFIX: api/v1
+      DATABASE_URL: postgresql://${POSTGRES_USER:-bercail}:${POSTGRES_PASSWORD:-bercail}@postgres:5432/${POSTGRES_DB:-bercail}?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?définissez JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?définissez JWT_REFRESH_SECRET}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-false}
+      SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL:-superadmin@lebercail.gn}
+      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:?définissez SUPER_ADMIN_PASSWORD}
+    ports:
+      - '${PORT:-3000}:3000'
+    volumes:
+      # Les fichiers téléversés survivent aux redéploiements.
+      - uploads:/app/uploads
+
+volumes:
+  postgres-data:
+  redis-data:
+  uploads:
