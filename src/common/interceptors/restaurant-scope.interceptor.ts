@@ -69,11 +69,18 @@ export class RestaurantScopeInterceptor implements NestInterceptor {
       );
     }
 
-    // Un client n'appartient à aucun établissement : le cloisonner
-    // l'empêcherait de commander ailleurs.
+    /*
+     * Un client n'appartient à aucun établissement : le cloisonner
+     * l'empêcherait de commander ailleurs.
+     *
+     * Son identifiant est tout de même porté par le contexte : il ne
+     * sert pas à filtrer ses données, mais à savoir **quelle maison le
+     * sert** — la plus proche de son adresse. Voir
+     * [[RestaurantRouter]].
+     */
     if (user.role === Role.CUSTOMER) {
       return restaurantContext.run(
-        { restaurantId: null, unrestricted: true },
+        { restaurantId: null, unrestricted: true, customerId: user.id },
         () => next.handle(),
       );
     }

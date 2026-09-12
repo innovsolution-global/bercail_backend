@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OpeningHour, Restaurant, SystemSettings } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import { RestaurantScopeService } from '../common/context/restaurant-scope.service';
 import { AppException, ERROR_CODES } from '../common/exceptions/app.exception';
 import type { AuthenticatedUser, RequestContext } from '../common/types/authenticated-user';
 import { PrismaService } from '../database/prisma.service';
@@ -33,20 +34,34 @@ export class SettingsService implements OnModuleInit {
     private readonly redis: RedisService,
     private readonly audit: AuditService,
     private readonly config: ConfigService,
+    private readonly scope: RestaurantScopeService,
   ) {}
 
   async onModuleInit(): Promise<void> {
-    // Le cache doit repartir propre après un redéploiement.
-    await this.redis.del(RESTAURANT_CACHE_KEY, SYSTEM_CACHE_KEY);
+    // Le cache doit repartir propre après un redéploiement. Par motif :
+    // il y a désormais une entrée par établissement.
+    await this.redis.delByPattern(`${RESTAURANT_CACHE_KEY}*`);
+    await this.redis.del(SYSTEM_CACHE_KEY);
   }
 
   // ─────────────────────────────── Lecture ────────────────────────────────
 
-  /** Restaurant courant, avec ses horaires. Lève si la base n'est pas semée. */
+  /**
+   * Le restaurant dont parle la requête, avec ses horaires.
+   *
+   * **Celui du compte**, et non plus le plus ancien : cette méthode sert
+   * aussi bien la fiche publique que l'écran « Réglages » du back-office,
+   * où elle décidait jusqu'ici de la maison **modifiée**. Un ADMIN de la
+   * seconde adresse y changeait donc les horaires, les frais de livraison
+   * et le minimum de commande de la première, sans qu'aucun écran ne le
+   * laisse deviner.
+   *
+   * Lève si la base n'est pas semée.
+   */
   async getRestaurant(): Promise<RestaurantWithHours> {
-    const restaurant = await this.prisma.restaurant.findFirst({
+    const restaurant = await this.prisma.restaurant.findUnique({
+      where: { id: await this.scope.restaurantForRequest() },
       include: { openingHours: { orderBy: { weekday: 'asc' } } },
-      orderBy: { createdAt: 'asc' },
     });
 
     if (!restaurant) {
@@ -58,10 +73,19 @@ export class SettingsService implements OnModuleInit {
     return restaurant;
   }
 
-  /** Version mise en cache, utilisée dans le chemin critique des commandes. */
+  /**
+   * Version mise en cache, utilisée dans le chemin critique des commandes.
+   *
+   * Une entrée **par établissement** : une clé unique servirait la fiche
+   * de la première maison lue à toutes les autres — donc ses frais de
+   * livraison et son minimum de commande, appliqués à des commandes qui
+   * ne la concernent pas.
+   */
   async getRestaurantCached(): Promise<RestaurantWithHours> {
     const ttl = this.config.get<number>('cache.settingsTtlSeconds') ?? 600;
-    const cached = await this.redis.get<RestaurantWithHours>(RESTAURANT_CACHE_KEY);
+    const cacheKey = `${RESTAURANT_CACHE_KEY}:${await this.scope.restaurantForRequest()}`;
+
+    const cached = await this.redis.get<RestaurantWithHours>(cacheKey);
     if (cached) {
       return {
         ...cached,
@@ -71,7 +95,7 @@ export class SettingsService implements OnModuleInit {
     }
 
     const restaurant = await this.getRestaurant();
-    await this.redis.set(RESTAURANT_CACHE_KEY, restaurant, ttl);
+    await this.redis.set(cacheKey, restaurant, ttl);
     return restaurant;
   }
 
@@ -113,6 +137,11 @@ export class SettingsService implements OnModuleInit {
       averagePreparationMinutes: restaurant.averagePreparationMinutes,
       averageDeliveryMinutes: restaurant.averageDeliveryMinutes,
       deliveryZones: restaurant.deliveryZones,
+      // La note laissée par les clients, nulle tant que personne n'a
+      // noté. La fiche affichait autrefois « 4,8 · 1 240 avis » écrit en
+      // dur ; ceci est le vrai chiffre, ou rien.
+      rating: restaurant.rating,
+      reviewCount: restaurant.reviewCount,
       currency: restaurant.currency,
     };
   }
@@ -143,12 +172,125 @@ export class SettingsService implements OnModuleInit {
 
   /** Vue publique, consommée par l'application Flutter. */
   async getPublicRestaurant() {
-    const restaurant = await this.getRestaurantCached();
+    return this.toPublicFiche(await this.getRestaurantCached());
+  }
+
+  /**
+   * La fiche publique d'une adresse **précise**.
+   *
+   * `getPublicRestaurant()` ne sait parler que de l'établissement servi
+   * au public. Le plan, lui, montre toutes les adresses de l'enseigne :
+   * il fallait bien pouvoir ouvrir celle sur laquelle on vient
+   * d'appuyer. Sans cette route, la fiche de Kipé aurait affiché les
+   * horaires, le téléphone et les frais de Kaloum sous le nom de Kipé —
+   * une erreur invisible, et qui envoie quelqu'un devant une porte
+   * fermée.
+   *
+   * Pas de cache ici : une fiche consultée à la demande ne justifie pas
+   * une entrée de plus par établissement, et celle qui compte — la
+   * maison servie, sur le chemin des commandes — garde la sienne.
+   */
+  async getPublicLocation(id: string) {
+    const restaurant = await this.prisma.restaurant.findFirst({
+      where: { id, isActive: true, deletedAt: null },
+      include: { openingHours: { orderBy: { weekday: 'asc' } } },
+    });
+
+    if (!restaurant) {
+      throw AppException.notFound('Cette adresse n’existe pas ou n’est plus ouverte.');
+    }
+
+    return this.toPublicFiche(restaurant);
+  }
+
+  /** Ce qu'une fiche publique montre, quelle que soit l'adresse. */
+  private async toPublicFiche(restaurant: RestaurantWithHours) {
     const settings = this.toRestaurantSettingsDto(restaurant);
+    const system = await this.getSystemSettings();
+
     return {
       ...settings,
       isOpenNow: this.isOpenNow(restaurant),
+      /**
+       * L'établissement dont l'application sert la carte.
+       *
+       * L'application s'en sert pour savoir si « Voir le menu » a un
+       * sens sur cette fiche : la carte, les prix et les frais servis
+       * sont ceux de cette maison-là, et d'aucune autre.
+       */
+      isPrimary: restaurant.id === (await this.scope.publicRestaurantId()),
+      /**
+       * Les moyens de paiement réellement proposables, dans l'ordre
+       * d'affichage.
+       *
+       * L'application les listait en dur, si bien que désactiver un
+       * opérateur en back-office ne la faisait pas changer d'avis :
+       * elle laissait choisir un moyen que la création de commande
+       * refusait ensuite en `PAYMENT_METHOD_DISABLED`. Le refus arrivait
+       * donc **après** le récapitulatif, au pire moment.
+       *
+       * Le paiement à la livraison n'a pas d'interrupteur : il ne
+       * dépend d'aucun opérateur, seulement d'un livreur qui encaisse.
+       */
+      paymentMethods: [
+        ...(system.orangeMoneyEnabled ? ['orange_money'] : []),
+        ...(system.mtnMoneyEnabled ? ['mtn_money'] : []),
+        ...(system.cardPaymentEnabled ? ['card'] : []),
+        'cash_on_delivery',
+      ],
     };
+  }
+
+  /**
+   * Toutes les adresses de l'enseigne, pour le plan de l'application.
+   *
+   * La fiche publique ne parle que d'**un** établissement — le plus
+   * ancien, celui dont l'application sert la carte (voir
+   * [[RestaurantScopeService.publicRestaurantId]]). L'onglet
+   * « Localisation » ne posait donc qu'un seul repère sur son plan,
+   * alors que l'enseigne en compte plusieurs : les autres adresses
+   * existaient en base, apparaissaient au back-office, et restaient
+   * invisibles au client.
+   *
+   * Cette liste est **délibérément maigre** : de quoi poser un repère,
+   * dire si l'on y sert en ce moment et lancer un itinéraire. Les frais
+   * de livraison, le minimum de commande et les moyens de paiement n'y
+   * sont pas — ils appartiennent à l'établissement qui prend la
+   * commande, et les publier ici laisserait croire qu'on peut commander
+   * dans chacun.
+   *
+   * `isPrimary` désigne celui-là, pour que l'application sache lequel de
+   * ses repères correspond à la carte qu'elle affiche.
+   */
+  async listPublicLocations() {
+    const [restaurants, primaryId] = await Promise.all([
+      this.prisma.restaurant.findMany({
+        where: { isActive: true, deletedAt: null },
+        include: { openingHours: { orderBy: { weekday: 'asc' } } },
+        orderBy: { createdAt: 'asc' },
+      }),
+      this.scope.publicRestaurantId(),
+    ]);
+
+    return restaurants.map((restaurant) => ({
+      id: restaurant.id,
+      name: restaurant.name,
+      tagline: restaurant.tagline,
+      logoUrl: restaurant.logoUrl,
+      coverImageUrl: restaurant.coverImageUrl,
+      phone: restaurant.phone,
+      address: restaurant.address,
+      district: restaurant.district,
+      city: restaurant.city,
+      latitude: restaurant.latitude,
+      longitude: restaurant.longitude,
+      // Calculé ici, établissement par établissement : deux adresses de
+      // la même enseigne n'ouvrent pas forcément aux mêmes heures.
+      isOpenNow: this.isOpenNow(restaurant),
+      deliveryEnabled: restaurant.deliveryEnabled,
+      pickupEnabled: restaurant.pickupEnabled,
+      isPrimary: restaurant.id === primaryId,
+    }));
   }
 
   // ─────────────────────────────── Écriture ───────────────────────────────
@@ -189,7 +331,7 @@ export class SettingsService implements OnModuleInit {
       return saved;
     });
 
-    await this.redis.del(RESTAURANT_CACHE_KEY);
+    await this.redis.del(`${RESTAURANT_CACHE_KEY}:${restaurant.id}`);
 
     await this.audit.record({
       actor,
@@ -286,14 +428,37 @@ export class SettingsService implements OnModuleInit {
     return minutes >= opens && minutes < closes;
   }
 
-  async assertOpenForOrders(): Promise<RestaurantWithHours> {
-    const restaurant = await this.getRestaurantCached();
+  async assertOpenForOrders(restaurantId?: string | null): Promise<RestaurantWithHours> {
+    const restaurant = restaurantId
+        ? await this.byId(restaurantId)
+        : await this.getRestaurantCached();
     if (!this.isOpenNow(restaurant)) {
       throw AppException.conflict(
         ERROR_CODES.RESTAURANT_CLOSED,
         'Le restaurant est actuellement fermé. Réessayez pendant les heures de service.',
       );
     }
+    return restaurant;
+  }
+
+  /**
+   * Un établissement précis, avec ses horaires.
+   *
+   * Utilisé par la création de commande : la maison qui cuisine est
+   * celle dont viennent les plats du panier, et c'est **ses** horaires,
+   * **ses** frais et **son** minimum qui s'appliquent — pas ceux de la
+   * maison que le contexte aurait désignée.
+   */
+  async byId(restaurantId: string): Promise<RestaurantWithHours> {
+    const restaurant = await this.prisma.restaurant.findFirst({
+      where: { id: restaurantId, isActive: true, deletedAt: null },
+      include: { openingHours: { orderBy: { weekday: 'asc' } } },
+    });
+
+    if (!restaurant) {
+      throw AppException.notFound('Cet établissement n’est plus ouvert.');
+    }
+
     return restaurant;
   }
 

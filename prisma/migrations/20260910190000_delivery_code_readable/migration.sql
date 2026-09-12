@@ -1,0 +1,11 @@
+-- Le client doit pouvoir relire son code de remise.
+--
+-- Le code n'était conservé que haché, au nom du secret. Mais la
+-- notification qui l'annonce au client le porte en clair — dans son corps
+-- comme dans ses données — et dort dans la même base. Le hachage ne
+-- protégeait donc déjà rien, tout en empêchant le client de retrouver son
+-- code une fois la notification effacée : le livreur attendait un chiffre
+-- que plus personne ne pouvait lire.
+--
+-- Le condensat reste utilisé pour la vérification à temps constant.
+ALTER TABLE "delivery_verification_codes" ADD COLUMN "code" TEXT;

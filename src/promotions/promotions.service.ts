@@ -54,7 +54,16 @@ export class PromotionsService {
   async publicList() {
     const now = new Date();
     const promotions = await this.prisma.promotion.findMany({
-      where: { deletedAt: null, isActive: true, startsAt: { lte: now }, endsAt: { gte: now } },
+      where: {
+        // La bande d'offres de l'accueil accompagne une carte : elle
+        // annonce celles de la maison dont on lit les plats, pas celles
+        // d'à côté, qu'on ne pourrait pas utiliser.
+        restaurantId: await this.scope.publicRestaurantId(),
+        deletedAt: null,
+        isActive: true,
+        startsAt: { lte: now },
+        endsAt: { gte: now },
+      },
       orderBy: { endsAt: 'asc' },
       take: 20,
     });
@@ -67,6 +76,9 @@ export class PromotionsService {
         id: promotion.id,
         name: promotion.name,
         description: promotion.description,
+        // C'est l'application client qui affiche la carte : sans le visuel
+        // ici, la photo ne servirait qu'au back-office.
+        imageUrl: promotion.imageUrl,
         code: promotion.code,
         type: toWire(promotion.type),
         value: promotion.value,
@@ -117,6 +129,7 @@ export class PromotionsService {
         restaurantId: this.scope.resolve(dto.restaurantId),
         name: dto.name,
         description: dto.description,
+        imageUrl: dto.imageUrl || null,
         code,
         type,
         value: dto.value,
@@ -164,6 +177,12 @@ export class PromotionsService {
       data: {
         name: dto.name,
         description: dto.description,
+        /*
+         * `undefined` laisse le visuel en place, la chaîne vide le retire.
+         * Sans cette distinction, on ne pourrait plus jamais enlever une
+         * image une fois posée : Prisma ignore `undefined`.
+         */
+        imageUrl: dto.imageUrl === undefined ? undefined : dto.imageUrl || null,
         type,
         value,
         minimumOrder: dto.minimumOrder,
@@ -253,9 +272,22 @@ export class PromotionsService {
   }
 
   /** Vérification d'un code par le client, avant de valider son panier. */
-  async check(code: string) {
+  /**
+   * @param publicOnly Vérification faite pour un client : elle est alors
+   *   ramenée à l'établissement qu'il consulte. Un compte du back-office
+   *   garde sa propre portée — le propriétaire doit pouvoir contrôler un
+   *   code de n'importe laquelle de ses maisons.
+   */
+  async check(code: string, publicOnly = false) {
     const promotion = await this.prisma.promotion.findFirst({
-      where: { code: code.trim().toUpperCase(), deletedAt: null },
+      where: {
+        code: code.trim().toUpperCase(),
+        deletedAt: null,
+        // Le refus est le même que pour un code inexistant : dire « ce
+        // code appartient à une autre adresse » révélerait l'offre d'une
+        // maison à la clientèle d'une autre.
+        ...(publicOnly ? { restaurantId: await this.scope.publicRestaurantId() } : {}),
+      },
     });
 
     if (!promotion || !promotion.isActive) {
@@ -312,6 +344,7 @@ export class PromotionsService {
       id: promotion.id,
       name: promotion.name,
       description: promotion.description,
+      imageUrl: promotion.imageUrl,
       code: promotion.code,
       type: toWire(promotion.type),
       value: promotion.value,

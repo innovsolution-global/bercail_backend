@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
   IsBoolean,
+  IsDefined,
   IsLatitude,
   IsLongitude,
   IsNotEmpty,
@@ -44,17 +45,26 @@ export class CreateAddressDto {
   @MaxLength(120)
   city?: string;
 
-  @ApiPropertyOptional({ example: 9.509167, description: 'Position GPS choisie sur la carte.' })
-  @IsOptional()
+  /*
+   * La position est **obligatoire** à la création.
+   *
+   * Elle était facultative, et une adresse sur cinq en base n'en avait
+   * pas. Or c'est elle qui décide de tout : quelle maison sert le
+   * client (la plus proche de chez lui), et où le livreur va — sans
+   * point, il cherche « N'nakaké » dans une application de plans.
+   * Décision du propriétaire, le 11 septembre 2026.
+   */
+  @ApiProperty({ example: 9.509167, description: 'Position GPS de l’adresse. Obligatoire.' })
+  @IsDefined({ message: 'La position GPS de l’adresse est obligatoire.' })
   @Type(() => Number)
-  @IsLatitude()
-  latitude?: number;
+  @IsLatitude({ message: 'La latitude n’est pas valide.' })
+  latitude!: number;
 
-  @ApiPropertyOptional({ example: -13.712222 })
-  @IsOptional()
+  @ApiProperty({ example: -13.712222 })
+  @IsDefined({ message: 'La position GPS de l’adresse est obligatoire.' })
   @Type(() => Number)
-  @IsLongitude()
-  longitude?: number;
+  @IsLongitude({ message: 'La longitude n’est pas valide.' })
+  longitude!: number;
 
   @ApiPropertyOptional({ description: 'Numéro à appeler à la livraison.' })
   @IsOptional()
@@ -80,4 +90,18 @@ export class UpdateAddressDto extends CreateAddressDto {
   @IsString()
   @MaxLength(200)
   declare street: string;
+
+  // Une modification partielle n'a pas à renvoyer la position : elle
+  // reste ce qu'elle était. Seule la création l'exige.
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsLatitude({ message: 'La latitude n’est pas valide.' })
+  declare latitude: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsLongitude({ message: 'La longitude n’est pas valide.' })
+  declare longitude: number;
 }

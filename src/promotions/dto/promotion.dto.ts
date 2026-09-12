@@ -38,6 +38,14 @@ export class CreatePromotionDto {
   @MaxLength(500)
   description?: string;
 
+  @ApiPropertyOptional({
+    description: 'Visuel de la carte promotionnelle, téléversé via POST /storage/promotion.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  imageUrl?: string;
+
   @ApiProperty({ example: 'BERCAIL10', description: 'Normalisé en majuscules.' })
   @IsString()
   @Matches(/^[A-Za-z0-9_-]{3,30}$/, {
@@ -113,6 +121,14 @@ export class UpdatePromotionDto {
   @IsString()
   @MaxLength(500)
   description?: string;
+
+  @ApiPropertyOptional({
+    description: 'Visuel de la carte promotionnelle, téléversé via POST /storage/promotion.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  imageUrl?: string;
 
   @ApiPropertyOptional()
   @IsOptional()

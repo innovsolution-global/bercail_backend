@@ -29,8 +29,17 @@ export type RealtimeEvent = (typeof REALTIME_EVENTS)[keyof typeof REALTIME_EVENT
 export const ROOMS = {
   user: (userId: string) => `user:${userId}`,
   role: (role: string) => `role:${role}`,
-  /** Salon d'exploitation : ADMIN et SUPER_ADMIN y reçoivent les commandes. */
+  /**
+   * Salon d'exploitation **de l'enseigne** : le propriétaire seul.
+   *
+   * Les gérants n'y sont plus : ils entrent dans le salon de leur
+   * établissement. Tant qu'ils partageaient celui-ci, chaque commande
+   * était annoncée à **toutes** les adresses — deux cuisines pouvaient
+   * préparer le même plat.
+   */
   backOffice: () => 'back-office',
+  /** Salon d'un établissement : ses gérants y reçoivent ses commandes. */
+  restaurant: (restaurantId: string) => `restaurant:${restaurantId}`,
   driver: (driverProfileId: string) => `driver:${driverProfileId}`,
   /** Suivi d'une commande précise (client, livreur assigné, back-office). */
   order: (orderId: string) => `order:${orderId}`,

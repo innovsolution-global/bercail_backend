@@ -20,6 +20,7 @@ describe('PricingService', () => {
 
   const pouletBraise = {
     id: 'item-poulet',
+    restaurantId: 'restaurant-1',
     name: 'Poulet braisé',
     price: 145000,
     promoPrice: null as number | null,
@@ -55,6 +56,7 @@ describe('PricingService', () => {
 
   const jus = {
     id: 'item-jus',
+    restaurantId: 'restaurant-1',
     name: 'Jus de gingembre',
     price: 20000,
     promoPrice: 15000,
@@ -71,14 +73,18 @@ describe('PricingService', () => {
       couponUsage: { count: jest.fn().mockResolvedValue(options.usages ?? 0) },
     };
 
-    const settings = { getRestaurantCached: jest.fn().mockResolvedValue(restaurant) };
+    const settings = {
+      getRestaurantCached: jest.fn().mockResolvedValue(restaurant),
+      // La maison est désormais désignée par les plats eux-mêmes.
+      byId: jest.fn().mockResolvedValue(restaurant),
+    };
 
     const service = new PricingService(
       prisma as never,
       settings as never,
     );
 
-    return { service, prisma };
+    return { service, prisma, settings };
   }
 
   describe('calcul du panier', () => {
@@ -382,6 +388,89 @@ describe('PricingService', () => {
           orderType: OrderType.DELIVERY,
         }),
       ).rejects.toThrow(/entre 1 et 50/);
+    });
+  });
+
+  /**
+   * Le cloisonnement par établissement.
+   *
+   * Un client n'appartient à aucune maison — c'est voulu, il commande où
+   * il veut — donc l'extension Prisma qui cloisonne les lectures ne
+   * s'applique pas à lui. La barrière doit donc exister **ici**, au
+   * moment où l'on chiffre : sans elle, un plat ou un code d'une autre
+   * adresse se règle au tarif de celle-ci, frais de livraison et
+   * minimum de commande compris.
+   */
+  describe('cloisonnement par établissement', () => {
+    const filtre = (appel: unknown): Record<string, unknown> =>
+      (appel as { where: Record<string, unknown> }).where;
+
+    it('chiffre chez la maison dont viennent les plats', async () => {
+      // Le devis chiffrait chez la maison du contexte — celle qui sert
+      // la carte au moment de l'appel. Un panier rempli avant un
+      // changement d'adresse devenait alors « introuvable ». Ce sont les
+      // plats qui désignent leur cuisine, et c'est **ses** frais qu'on
+      // applique.
+      const { service, prisma, settings } = buildService();
+
+      await service.quote({
+        lines: [{ menuItemId: 'item-jus', quantity: 1 }],
+        orderType: OrderType.PICKUP,
+      });
+
+      expect(settings.byId).toHaveBeenCalledWith('restaurant-1');
+      expect(settings.getRestaurantCached).not.toHaveBeenCalled();
+      expect(filtre(prisma.menuItem.findMany.mock.calls[0][0]).restaurantId).toBeUndefined();
+    });
+
+    it('refuse un panier qui mélange deux maisons', async () => {
+      // On ne facture pas un plat de Kipé au tarif de livraison de
+      // Kaloum : deux cuisines dans un devis, et il n'y a pas de devis.
+      const { service } = buildService({
+        items: [pouletBraise, { ...jus, restaurantId: 'restaurant-2' }],
+      });
+
+      await expect(
+        service.quote({
+          lines: [
+            { menuItemId: 'item-poulet', quantity: 1, optionIds: ['opt-riz'] },
+            { menuItemId: 'item-jus', quantity: 1 },
+          ],
+          orderType: OrderType.PICKUP,
+        }),
+      ).rejects.toThrow(/deux établissements/);
+    });
+
+    it('ne cherche un code promotionnel que dans cette maison', async () => {
+      // Une remise est offerte par une maison sur ses propres marges :
+      // un code de la seconde adresse ne doit pas entamer la recette de
+      // la première.
+      const { service, prisma } = buildService({
+        promotion: {
+          id: 'promo-1',
+          code: 'BIENVENUE10',
+          name: 'Bienvenue',
+          description: null,
+          type: PromotionType.PERCENTAGE,
+          value: 10,
+          minimumOrder: 0,
+          maxDiscount: 20000,
+          usageLimit: null,
+          usageCount: 0,
+          perCustomerLimit: null,
+          isActive: true,
+          startsAt: new Date(Date.now() - 86400000),
+          endsAt: new Date(Date.now() + 86400000),
+        },
+      });
+
+      await service.quote({
+        lines: [{ menuItemId: 'item-jus', quantity: 1 }],
+        orderType: OrderType.PICKUP,
+        promotionCode: 'BIENVENUE10',
+      });
+
+      expect(filtre(prisma.promotion.findFirst.mock.calls[0][0]).restaurantId).toBe(restaurant.id);
     });
   });
 });

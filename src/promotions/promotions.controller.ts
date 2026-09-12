@@ -57,8 +57,9 @@ export class PromotionsController {
       'Contrôle la validité et la période. Le montant de la remise, lui, est calculé au moment du devis ou de la commande.',
     roles: [Role.CUSTOMER],
   })
-  check(@Param('code') code: string) {
-    return this.promotions.check(code);
+  check(@Param('code') code: string, @CurrentUser() user?: AuthenticatedUser) {
+    const isBackOffice = user?.role === Role.ADMIN || user?.role === Role.SUPER_ADMIN;
+    return this.promotions.check(code, !isBackOffice);
   }
 
   @Get(':id')

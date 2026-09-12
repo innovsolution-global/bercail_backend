@@ -31,6 +31,7 @@ import {
   PaymentQueryDto,
   RefundPaymentDto,
 } from './dto/payment.dto';
+import { ChapChapService } from './chapchap.service';
 import { PaymentsService } from './payments.service';
 
 /**
@@ -42,7 +43,10 @@ import { PaymentsService } from './payments.service';
 @ApiTags('Payments')
 @Controller('payments')
 export class PaymentsController {
-  constructor(private readonly payments: PaymentsService) {}
+  constructor(
+    private readonly payments: PaymentsService,
+    private readonly chapchap: ChapChapService,
+  ) {}
 
   @Get()
   @Roles(Role.ADMIN, Role.SUPER_ADMIN)
@@ -55,6 +59,20 @@ export class PaymentsController {
   })
   list(@Query() query: PaymentQueryDto) {
     return this.payments.list(query);
+  }
+
+  @Get('provider')
+  @Roles(Role.ADMIN, Role.SUPER_ADMIN)
+  @RequirePermissions('PAYMENTS_READ')
+  @ApiEndpoint({
+    summary: 'État de l’opérateur de paiement',
+    description:
+      'Intégration active ou non, adresse de rappel à déclarer chez l’opérateur, et alertes de configuration. Aucune clé n’est renvoyée.',
+    roles: [Role.ADMIN, Role.SUPER_ADMIN],
+    permissions: ['PAYMENTS_READ'],
+  })
+  provider() {
+    return this.chapchap.status();
   }
 
   @Get('export')
@@ -142,6 +160,24 @@ export class PaymentsController {
     @Ctx() context: RequestContext,
   ) {
     return this.payments.confirm(id, user, context, dto.providerRef);
+  }
+
+  @Post(':id/abandon')
+  @Roles(Role.CUSTOMER)
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 20, ttl: 300_000 } })
+  @ApiEndpoint({
+    summary: 'Abandonner un paiement en cours',
+    description:
+      "Appelée quand le client referme la page de l'opérateur. L'état est d'abord redemandé à l'opérateur : un paiement qui vient d'aboutir n'est pas annulé par la fermeture.",
+    roles: [Role.CUSTOMER],
+  })
+  abandon(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Ctx() context: RequestContext,
+  ) {
+    return this.payments.abandon(id, user, context);
   }
 
   @Post(':id/fail')

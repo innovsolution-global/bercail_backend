@@ -12,6 +12,7 @@ import {
   User,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import { ChapChapService } from './chapchap.service';
 import { paginate, type PaginatedResult } from '../common/dto/paginated-result';
 import { AppException, ERROR_CODES } from '../common/exceptions/app.exception';
 import { IdempotencyService } from '../common/services/idempotency.service';
@@ -22,6 +23,9 @@ import { PrismaService } from '../database/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RealtimeService } from '../realtime/realtime.service';
 import type { InitiatePaymentDto, PaymentQueryDto, RefundPaymentDto } from './dto/payment.dto';
+
+/** Motif inscrit au journal quand le client referme la page de paiement. */
+const ABANDON_REASON = 'Paiement abandonné par le client';
 
 type PaymentRow = Payment & {
   order?: { id: string; reference: string; status: OrderStatus } | null;
@@ -51,6 +55,7 @@ export class PaymentsService {
     private readonly realtime: RealtimeService,
     private readonly audit: AuditService,
     private readonly idempotency: IdempotencyService,
+    private readonly chapchap: ChapChapService,
     private readonly config: ConfigService,
   ) {}
 
@@ -125,6 +130,11 @@ export class PaymentsService {
 
   /** Paiement d'une commande, vu par son client. */
   async findForOrder(user: AuthenticatedUser, orderId: string) {
+    // Avant de répondre, on rattrape un éventuel rappel manqué : c'est
+    // cette route que l'application interroge pendant que le client
+    // règle, donc le meilleur endroit pour combler le silence.
+    await this.reconcileWithOperator(orderId);
+
     const payment = await this.prisma.payment.findUnique({
       where: { orderId },
       include: {
@@ -214,6 +224,37 @@ export class PaymentsService {
 
     const masked = dto.phone ? this.mask(dto.phone) : null;
 
+    /*
+     * Ouverture de l'opération chez l'opérateur.
+     *
+     * Quand Chap Chap est configuré, c'est lui qui encaisse et qui renvoie
+     * la page où le client choisit son moyen de paiement. Sans clés, on
+     * retombe sur la référence simulée d'avant — ce qui laisse le bac à
+     * sable et les tests fonctionner sans dépendre du réseau.
+     */
+    let providerRef = `SIM-${payment.transactionRef}`;
+    let paymentUrl: string | null = null;
+
+    if (this.chapchap.enabled) {
+      const operation = await this.chapchap.createOperation({
+        // Notre référence de transaction voyage aller-retour : c'est elle
+        // qui nous permettra de reconnaître le paiement au rappel.
+        reference: payment.transactionRef,
+        amount: payment.amount,
+        description: `Commande ${order.reference}`,
+        customerPhone: dto.phone ?? null,
+        notifyUrl: this.chapchap.notifyUrl(),
+        // Pages d'atterrissage : le client ne reste pas devant l'écran de
+        // l'opérateur. Elles ne décident de rien — c'est le rappel signé
+        // qui marque la commande payée, que le client y arrive ou non.
+        returnUrl: this.chapchap.returnUrl(payment.transactionRef),
+        cancelUrl: this.chapchap.cancelUrl(payment.transactionRef),
+      });
+
+      providerRef = operation.providerRef;
+      paymentUrl = operation.paymentUrl;
+    }
+
     // Le fournisseur mobile money confirme de façon asynchrone : on passe
     // en PROCESSING et on attend son rappel (webhook).
     const updated = await this.prisma.payment.update({
@@ -221,7 +262,7 @@ export class PaymentsService {
       data: {
         status: PaymentStatus.PROCESSING,
         maskedAccount: masked,
-        providerRef: `SIM-${payment.transactionRef}`,
+        providerRef,
         events: {
           create: {
             label: `Paiement initié (${toWire(payment.method)})`,
@@ -260,8 +301,21 @@ export class PaymentsService {
 
     return {
       ...this.toDto(updated),
+      /**
+       * Page de paiement à ouvrir pour le client.
+       *
+       * Nulle sans opérateur configuré : l'application retombe alors sur
+       * les instructions ci-dessous.
+       */
+      paymentUrl,
       /** Instructions destinées à l'application mobile. */
-      instructions: this.sandbox
+      instructions: paymentUrl
+        ? {
+            mode: 'redirect',
+            message:
+              'Ouvrez la page de paiement pour choisir votre opérateur et valider la transaction.',
+          }
+        : this.sandbox
         ? {
             mode: 'sandbox',
             message:
@@ -359,10 +413,152 @@ export class PaymentsService {
       context,
     });
 
+    await this.announceToKitchen(payment.orderId);
+
     return this.toDto(updated);
   }
 
+  /**
+   * Transmet la commande à la cuisine, une fois l'argent encaissé.
+   *
+   * Une commande réglée en ligne n'est pas annoncée à sa création : le
+   * client peut ouvrir la page de l'opérateur puis se raviser, et le
+   * restaurant aurait engagé des denrées pour rien. L'annonce attend
+   * donc ce moment-ci, où le paiement est acquis.
+   *
+   * Un échec ici ne défait pas le paiement : l'argent est encaissé, la
+   * commande existe, et elle reste visible dans la liste du back-office
+   * même si la notification n'est pas partie. On journalise plutôt que
+   * de faire échouer une confirmation d'encaissement.
+   */
+  private async announceToKitchen(orderId: string): Promise<void> {
+    try {
+      const order = await this.prisma.order.findUnique({
+        where: { id: orderId },
+        include: {
+          customer: { select: { firstName: true, lastName: true, phone: true } },
+          _count: { select: { items: true } },
+        },
+      });
+
+      if (!order) return;
+
+      // Le paiement à la livraison a déjà été annoncé à la création :
+      // le ré-annoncer ferait sonner la cuisine deux fois.
+      if (order.paymentMethod === PaymentMethod.CASH_ON_DELIVERY) return;
+
+      const customerName = order.customer
+        ? `${order.customer.firstName} ${order.customer.lastName}`.trim()
+        : (order.walkInName ?? 'Client');
+
+      this.realtime.orderCreated({
+        id: order.id,
+        customerId: order.customerId,
+        reference: order.reference,
+        customerName,
+        type: toWire(order.type),
+        status: toWire(order.status),
+        total: order.total,
+        paymentStatus: toWire(PaymentStatus.PAID),
+        createdAt: order.createdAt.toISOString(),
+      });
+
+      await this.notifications.notifyBackOffice(
+        {
+          type: NotificationType.ORDER_CREATED,
+          title: 'Nouvelle commande payée',
+          body: `${customerName} — ${formatAmount(order.total)} (${order.reference})`,
+          link: `/orders/${order.id}`,
+          entityId: order.id,
+        },
+        // La cuisine qui prépare, et le propriétaire.
+        order.restaurantId,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Commande ${orderId} payée mais non annoncée à la cuisine : ${(error as Error).message}`,
+      );
+    }
+  }
+
   /** Échec signalé par l'opérateur. */
+  /**
+   * Le client a fermé la page de paiement.
+   *
+   * La page de l'opérateur s'affiche désormais **dans** l'application, et
+   * sa croix de fermeture referme la transaction avec elle : sans cela,
+   * un paiement resterait « en cours » pour toujours, la commande dans
+   * les limbes, et le client verrait « Payer » sur une commande qu'il a
+   * lui-même abandonnée.
+   *
+   * ## L'ordre des deux gestes n'est pas indifférent
+   *
+   * On **demande d'abord son état à l'opérateur**. Fermer la page une
+   * seconde après avoir validé chez Orange ou Kulu est le geste le plus
+   * naturel du monde ; déclarer alors l'argent perdu serait une faute
+   * lourde — le client aurait payé une commande marquée en échec. Un
+   * paiement déjà abouti est donc rendu tel quel, et la fermeture n'y
+   * touche pas.
+   *
+   * Aucune notification « Paiement refusé » n'est envoyée : le client
+   * vient de fermer la page, il n'a pas à l'apprendre de nous.
+   */
+  async abandon(paymentId: string, user: AuthenticatedUser, context: RequestContext) {
+    const payment = await this.prisma.payment.findUnique({ where: { id: paymentId } });
+    if (!payment) throw AppException.notFound('Paiement introuvable.');
+
+    if (payment.customerId !== user.id) {
+      throw AppException.forbidden(ERROR_CODES.FORBIDDEN, "Vous n'avez pas accès à ce paiement.");
+    }
+
+    await this.reconcileWithOperator(payment.orderId);
+
+    const apresReconciliation = await this.prisma.payment.findUnique({ where: { id: paymentId } });
+    const tranche =
+      apresReconciliation !== null &&
+      apresReconciliation.status !== PaymentStatus.PENDING &&
+      apresReconciliation.status !== PaymentStatus.PROCESSING;
+
+    // Déjà payé, déjà en échec, déjà remboursé : il n'y a rien à
+    // abandonner, et l'état réel prime sur le geste de fermeture.
+    if (tranche) return this.findForOrder(user, payment.orderId);
+
+    const updated = await this.prisma.transaction(async (tx) => {
+      const result = await tx.payment.update({
+        where: { id: paymentId },
+        data: {
+          status: PaymentStatus.FAILED,
+          failureReason: ABANDON_REASON,
+          events: { create: { label: ABANDON_REASON, status: PaymentStatus.FAILED } },
+        },
+        include: {
+          order: { select: { id: true, reference: true, status: true } },
+          customer: { select: { id: true, firstName: true, lastName: true } },
+          events: { orderBy: { createdAt: 'asc' } },
+        },
+      });
+
+      await tx.order.update({
+        where: { id: payment.orderId },
+        data: { paymentStatus: PaymentStatus.FAILED },
+      });
+
+      return result;
+    });
+
+    await this.audit.record({
+      actor: user,
+      action: 'PAYMENT_ABANDONED',
+      module: 'payments',
+      entityType: 'Payment',
+      entityId: paymentId,
+      newValue: { reason: ABANDON_REASON },
+      context,
+    });
+
+    return this.toDto(updated);
+  }
+
   async markFailed(paymentId: string, reason: string, actor: AuthenticatedUser, context: RequestContext) {
     const payment = await this.prisma.payment.findUnique({ where: { id: paymentId } });
     if (!payment) throw AppException.notFound('Paiement introuvable.');
@@ -561,4 +757,201 @@ export class PaymentsService {
       createdAt: payment.createdAt.toISOString(),
     };
   }
+
+  /* ------------------------------------------------------------------ */
+  /* Chap Chap Pay                                                       */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Applique le dénouement annoncé par Chap Chap.
+   *
+   * Appelée par le rappel, dont la signature a déjà été vérifiée. Trois
+   * précautions gouvernent ce traitement :
+   *
+   *  • **Idempotence.** Un opérateur réessaie tant qu'il n'a pas d'accusé,
+   *    et rejoue parfois un rappel déjà traité. Un paiement déjà encaissé
+   *    n'est pas encaissé une seconde fois — sans quoi le chiffre
+   *    d'affaires du jour compterait la même vente deux fois.
+   *
+   *  • **Le montant est relu chez nous.** Ce que le rappel annonce n'est
+   *    pas ce qui fait le montant de la commande : on ne fait qu'y lire un
+   *    statut. Un rappel ne peut donc pas modifier ce qui est dû.
+   *
+   *  • **On ne lève pas d'erreur sur un rappel inconnu.** Répondre en échec
+   *    ferait réessayer l'opérateur indéfiniment pour une transaction qui
+   *    ne nous concerne pas.
+   */
+  async applyChapChapCallback(payload: Record<string, unknown>): Promise<void> {
+    const reference = this.readString(payload, [
+      'reference',
+      'merchant_reference',
+      'merchantReference',
+      'order_reference',
+      'orderReference',
+    ]);
+
+    const providerRef = this.readString(payload, [
+      'transaction_id',
+      'transactionId',
+      'operation_id',
+      'operationId',
+      'id',
+    ]);
+
+    if (!reference && !providerRef) {
+      this.logger.warn('Rappel Chap Chap sans référence exploitable : ignoré.');
+      return;
+    }
+
+    const payment = await this.prisma.payment.findFirst({
+      where: {
+        OR: [
+          ...(reference ? [{ transactionRef: reference }] : []),
+          ...(providerRef ? [{ providerRef }] : []),
+        ],
+      },
+    });
+
+    if (!payment) {
+      this.logger.warn(
+        `Rappel Chap Chap pour une transaction inconnue (${reference ?? providerRef}) : ignoré.`,
+      );
+      return;
+    }
+
+    const outcome = this.readChapChapStatus(payload);
+
+    if (outcome === 'unknown') {
+      this.logger.warn(
+        `Rappel Chap Chap au statut non reconnu pour ${payment.transactionRef} : ${JSON.stringify(payload).slice(0, 200)}`,
+      );
+      return;
+    }
+
+    // Déjà dans l'état annoncé : le rappel est un doublon.
+    if (
+      (outcome === 'paid' && payment.status === PaymentStatus.PAID) ||
+      (outcome === 'failed' && payment.status === PaymentStatus.FAILED)
+    ) {
+      return;
+    }
+
+    // Un paiement déjà encaissé ne redevient pas en échec sur un rappel
+    // tardif : seul un remboursement peut défaire un encaissement.
+    if (payment.status === PaymentStatus.PAID && outcome === 'failed') {
+      this.logger.warn(
+        `Rappel d'échec ignoré : le paiement ${payment.transactionRef} est déjà encaissé.`,
+      );
+      return;
+    }
+
+    const operator: AuthenticatedUser = {
+      id: payment.customerId ?? 'chapchap',
+      email: 'chapchap@operateur',
+      role: Role.SUPER_ADMIN,
+      status: 'ACTIVE',
+      firstName: 'Chap Chap',
+      lastName: 'Pay',
+      permissions: [],
+      mustChangePassword: false,
+    } as AuthenticatedUser;
+
+    const context: RequestContext = {
+      requestId: `chapchap-${providerRef ?? reference ?? payment.id}`,
+      userAgent: 'chapchap-webhook',
+    };
+
+    if (outcome === 'paid') {
+      await this.confirm(payment.id, operator, context, providerRef ?? undefined);
+      return;
+    }
+
+    await this.markFailed(
+      payment.id,
+      this.readString(payload, ['message', 'reason', 'status_message']) ??
+        "Transaction refusée par l'opérateur.",
+      operator,
+      context,
+    );
+  }
+
+  /** Traduit le statut annoncé par l'opérateur. */
+  /**
+   * Va chercher chez l'opérateur le dénouement qu'on n'a pas reçu.
+   *
+   * Le rappel signé reste la voie normale. Celle-ci est le filet : sur
+   * une machine de développement, notre serveur n'est joignable de
+   * l'extérieur qu'à travers un tunnel, et si personne ne l'a lancé le
+   * paiement resterait « en cours » indéfiniment — le client a payé,
+   * l'application attend, et rien ne se débloque jamais.
+   *
+   * On ne demande que pour un paiement réellement en vol : un paiement
+   * déjà tranché n'a rien à apprendre, et interroger l'opérateur à
+   * chaque lecture coûterait un aller-retour pour rien.
+   */
+  private async reconcileWithOperator(orderId: string): Promise<void> {
+    if (!this.chapchap.enabled) return;
+
+    const payment = await this.prisma.payment.findUnique({ where: { orderId } });
+    if (!payment || payment.status !== PaymentStatus.PROCESSING) return;
+
+    const operation = await this.chapchap.readOperation(payment.transactionRef);
+    if (!operation) return;
+
+    /*
+     * L'état arrive sous la forme `{"status": {"code": "..."}}`, là où
+     * le rappel l'envoie à plat. On l'aplatit pour que les deux voies
+     * partagent la même lecture — et donc le même vocabulaire de
+     * statuts, sans risque qu'elles divergent.
+     */
+    const status = operation.status;
+    const code =
+      typeof status === 'object' && status !== null
+        ? (status as Record<string, unknown>).code
+        : status;
+
+    await this.applyChapChapCallback({
+      reference: payment.transactionRef,
+      status: code,
+      transaction_id: operation.operation_id,
+    });
+  }
+
+  private readChapChapStatus(payload: Record<string, unknown>): 'paid' | 'failed' | 'unknown' {
+    const raw = (
+      this.readString(payload, ['status', 'state', 'transaction_status', 'transactionStatus']) ?? ''
+    ).toLowerCase();
+
+    if (['success', 'successful', 'succeeded', 'paid', 'completed', 'complete', 'approved', 'ok'].includes(raw)) {
+      return 'paid';
+    }
+
+    if (['failed', 'failure', 'cancelled', 'canceled', 'declined', 'rejected', 'expired', 'error'].includes(raw)) {
+      return 'failed';
+    }
+
+    // « pending » et consorts : la transaction n'est pas dénouée, il n'y a
+    // rien à écrire. Un autre rappel suivra.
+    return 'unknown';
+  }
+
+  /** Lit la première clé présente, y compris dans un objet `data` imbriqué. */
+  private readString(source: Record<string, unknown>, keys: string[]): string | null {
+    const nested = source.data;
+    const candidates: Record<string, unknown>[] = [source];
+    if (typeof nested === 'object' && nested !== null) {
+      candidates.push(nested as Record<string, unknown>);
+    }
+
+    for (const candidate of candidates) {
+      for (const key of keys) {
+        const value = candidate[key];
+        if (typeof value === 'string' && value.length > 0) return value;
+        if (typeof value === 'number') return String(value);
+      }
+    }
+
+    return null;
+  }
+
 }

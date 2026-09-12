@@ -19,6 +19,26 @@ export interface RestaurantScope {
   restaurantId: string | null;
   /** Vrai si le compte franchit les cloisons. */
   unrestricted: boolean;
+
+  /**
+   * Le client de la requête, s'il y en a un.
+   *
+   * Un client n'appartient à aucun établissement — il commande où il
+   * veut — mais il en est **servi** par un : le plus proche de lui. Son
+   * identifiant est retenu ici pour que cette résolution se fasse une
+   * fois par requête, et non à chaque lecture publique.
+   */
+  customerId?: string | null;
+
+  /**
+   * Mémo de la maison qui sert ce client, le temps de la requête.
+   *
+   * Une promesse, et non un identifiant : plusieurs lectures publiques
+   * peuvent partir en parallèle sur une même requête — la carte, la
+   * fiche, les promotions — et toutes doivent parler de la **même**
+   * maison, sans la chercher trois fois.
+   */
+  servedBy?: Promise<string>;
 }
 
 const storage = new AsyncLocalStorage<RestaurantScope>();

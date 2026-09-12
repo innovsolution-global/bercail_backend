@@ -37,14 +37,27 @@ export class CategoriesService {
     await this.redis.delByPattern('menu:items*');
   }
 
-  async list(includeInactive = false) {
-    const cacheKey = `${CACHE_PREFIX}:${includeInactive ? 'all' : 'active'}`;
+  /**
+   * @param publicOnly Lecture faite pour un client, et non pour le
+   *   back-office : elle est alors ramenée à l'établissement servi au
+   *   public. Les comptes du back-office, eux, sont déjà cloisonnés par
+   *   le client Prisma — un ADMIN chez lui, le propriétaire partout.
+   */
+  async list(includeInactive = false, publicOnly = false) {
+    const restaurantId = publicOnly ? await this.scope.publicRestaurantId() : null;
+
+    // L'établissement entre dans la clé : sans lui, la première lecture
+    // servirait sa carte à tout le monde, y compris à l'autre maison.
+    const cacheKey = `${CACHE_PREFIX}:${includeInactive ? 'all' : 'active'}:${
+      restaurantId ?? 'portee-du-compte'
+    }`;
 
     return this.redis.remember(cacheKey, this.ttl, async () => {
       const categories = await this.prisma.category.findMany({
         where: {
           deletedAt: null,
           ...(includeInactive ? {} : { isActive: true }),
+          ...(restaurantId ? { restaurantId } : {}),
         },
         include: {
           _count: {
@@ -58,9 +71,18 @@ export class CategoriesService {
     });
   }
 
-  async findOne(id: string) {
+  async findOne(id: string, publicOnly = false) {
+    // Le slug n'est unique que **par établissement** : sans cette
+    // restriction, « grillades » désignerait la catégorie de la
+    // première maison venue.
+    const restaurantId = publicOnly ? await this.scope.publicRestaurantId() : null;
+
     const category = await this.prisma.category.findFirst({
-      where: { OR: [{ id }, { slug: id }], deletedAt: null },
+      where: {
+        OR: [{ id }, { slug: id }],
+        deletedAt: null,
+        ...(restaurantId ? { restaurantId } : {}),
+      },
       include: { _count: { select: { menuItems: { where: { deletedAt: null } } } } },
     });
 

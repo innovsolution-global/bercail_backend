@@ -143,6 +143,35 @@ export class CartsService {
     const cart = await this.ensureCart(userId);
     const optionIds = [...new Set(dto.optionIds ?? [])].sort();
 
+    /*
+     * **Un panier, une cuisine.**
+     *
+     * Un plat appartient à une carte, une carte à une maison : le panier
+     * qui en mélange deux ne peut être ni chiffré ni cuisiné. Cela
+     * n'arrive pas depuis l'écran — la carte servie est celle d'une
+     * seule maison — mais la carte peut changer entre deux ajouts, quand
+     * le client enregistre une adresse plus proche d'une autre maison.
+     * On le lui dit, avec les noms, plutôt que de le laisser découvrir
+     * un panier en erreur.
+     */
+    const dejaLa = await this.prisma.cartItem.findFirst({
+      where: { cartId: cart.id },
+      select: { menuItem: { select: { restaurantId: true, restaurant: { select: { name: true } } } } },
+    });
+    if (dejaLa) {
+      const nouveau = await this.prisma.menuItem.findUnique({
+        where: { id: dto.menuItemId },
+        select: { restaurantId: true, restaurant: { select: { name: true } } },
+      });
+      if (nouveau && nouveau.restaurantId !== dejaLa.menuItem.restaurantId) {
+        throw AppException.conflict(
+          ERROR_CODES.CONFLICT,
+          `Votre panier contient des plats de « ${dejaLa.menuItem.restaurant.name} ». ` +
+            `Videz-le pour commander chez « ${nouveau.restaurant.name} ».`,
+        );
+      }
+    }
+
     const existing = await this.prisma.cartItem.findMany({
       where: { cartId: cart.id, menuItemId: dto.menuItemId },
       include: { options: true },

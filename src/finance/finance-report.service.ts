@@ -514,6 +514,7 @@ export class FinanceReportService {
       FROM order_items oi
       JOIN orders o ON o.id = oi."orderId"
       WHERE o."deletedAt" IS NULL
+        AND ${restaurantFilter('o."restaurantId"')}
         AND o.status = 'DELIVERED'
         AND o."createdAt" >= ${from} AND o."createdAt" <= ${to}
       GROUP BY oi.name

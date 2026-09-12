@@ -90,6 +90,54 @@ export interface AppConfiguration {
     orangeMoney: { enabled: boolean; baseUrl: string; merchantId: string; apiKey: string };
     mtnMoney: { enabled: boolean; baseUrl: string; merchantId: string; apiKey: string };
     card: { enabled: boolean; publicKey: string; secretKey: string };
+    /**
+     * Chap Chap Pay — encaissement mobile money en Guinée.
+     *
+     * Un seul opérateur remplace les intégrations séparées Orange et MTN :
+     * c'est lui qui présente au client le choix de son moyen de paiement.
+     * Voir https://chapchappay.com/guide/
+     */
+    chapchap: {
+      /** Déduit de la présence des clés : pas de drapeau à oublier. */
+      enabled: boolean;
+      baseUrl: string;
+      apiKey: string;
+      /** Sert à signer les requêtes sortantes. */
+      hmacSecret: string;
+      /** Chemin de création d'une opération, relatif à `baseUrl`. */
+      ecommercePath: string;
+      /**
+       * Secret de vérification des rappels. Distinct du précédent chez
+       * certains opérateurs ; à défaut, `hmacSecret` fait office.
+       */
+      webhookSecret: string;
+      signatureHeader: string;
+      /**
+       * Adresse publique du serveur, telle que Chap Chap peut la joindre.
+       *
+       * Distincte d'`API_URL` : en développement celle-ci vaut
+       * `localhost`, que les serveurs de l'opérateur ne peuvent pas
+       * atteindre. C'est ici qu'on met l'adresse du tunnel.
+       */
+      publicBaseUrl: string;
+      /** Chemin public que Chap Chap rappellera. */
+      notifyPath: string;
+      /** Site qui accueille le client après paiement. */
+      frontendBaseUrl: string;
+      /** Page d'atterrissage après un paiement abouti. */
+      returnPath: string;
+      /** Page d'atterrissage après un abandon ou un refus. */
+      cancelPath: string;
+      /**
+       * Accepte un rappel non signé.
+       *
+       * Uniquement pour un poste de développement sans tunnel : sans
+       * signature, n'importe qui peut déclarer un paiement encaissé.
+       */
+      allowUnsigned: boolean;
+      /** Nommage des champs envoyés : `snake` ou `camel`. */
+      bodyStyle: 'snake' | 'camel';
+    };
     /** En développement, les paiements mobiles sont simulés localement. */
     sandbox: boolean;
   };
@@ -242,6 +290,39 @@ export default (): AppConfiguration => {
         publicKey: process.env.CARD_PUBLIC_KEY ?? '',
         secretKey: process.env.CARD_SECRET_KEY ?? '',
       },
+      chapchap: {
+        enabled: Boolean(process.env.CHAPCHAP_API_KEY && process.env.CHAPCHAP_HMAC_SECRET),
+        baseUrl: (process.env.CHAPCHAP_API_BASE_URL ?? 'https://chapchappay.com/api').replace(
+          /\/$/,
+          '',
+        ),
+        apiKey: process.env.CHAPCHAP_API_KEY ?? '',
+        hmacSecret: process.env.CHAPCHAP_HMAC_SECRET ?? '',
+        ecommercePath: (process.env.CHAPCHAP_ECOMMERCE_PATH ?? 'ecommerce/create').replace(
+          /^\//,
+          '',
+        ),
+        // À défaut de secret dédié, les rappels se vérifient avec le même
+        // secret que les requêtes sortantes.
+        webhookSecret: process.env.CHAPCHAP_WEBHOOK_SECRET || (process.env.CHAPCHAP_HMAC_SECRET ?? ''),
+        signatureHeader: (
+          process.env.CHAPCHAP_WEBHOOK_SIGNATURE_HEADER ?? 'CCP-HMAC-Signature'
+        ).toLowerCase(),
+        // Sans tunnel déclaré, on retombe sur l'adresse de l'API : le
+        // rappel n'arrivera pas, mais l'écran de supervision le dit.
+        publicBaseUrl: (
+          process.env.CHAPCHAP_PUBLIC_BASE_URL ||
+          process.env.API_URL ||
+          `http://localhost:${port}`
+        ).replace(/\/$/, ''),
+        notifyPath: process.env.CHAPCHAP_PUBLIC_NOTIFY_PATH ?? '/v1/webhooks/chapchap',
+        frontendBaseUrl: (process.env.CHAPCHAP_FRONTEND_BASE_URL ?? '').replace(/\/$/, ''),
+        returnPath: process.env.CHAPCHAP_RETURN_PATH ?? '/paiement/succes',
+        cancelPath: process.env.CHAPCHAP_CANCEL_PATH ?? '/paiement/echec',
+        allowUnsigned: toBool(process.env.CHAPCHAP_WEBHOOK_ALLOW_UNSIGNED, false),
+        bodyStyle: process.env.CHAPCHAP_REQUEST_BODY_STYLE === 'camel' ? 'camel' : 'snake',
+      },
+
       sandbox: toBool(process.env.PAYMENT_SANDBOX, env !== 'production'),
     },
 

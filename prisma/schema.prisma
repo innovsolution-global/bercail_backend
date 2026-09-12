@@ -240,7 +240,9 @@ model DriverProfile {
   isAvailable Boolean   @default(false)
   lastSeenAt  DateTime?
 
-  rating              Float @default(5)
+  /// Note moyenne, nulle tant que personne n'a noté. Pas de 5 par défaut :
+  /// une note inventée se lit comme une note méritée.
+  rating              Float?
   completedDeliveries Int   @default(0)
   cancelledDeliveries Int   @default(0)
   /// Distance cumulée en mètres (entier : pas de flottant sur les compteurs).
@@ -256,6 +258,7 @@ model DriverProfile {
   updatedAt DateTime @updatedAt
 
   deliveries Delivery[]
+  reviews    OrderReview[]
   locations  DriverLocation[]
 
   @@index([isOnline, isAvailable])
@@ -393,8 +396,15 @@ model Restaurant {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
+  /// Note moyenne laissée par les clients, nulle tant que personne n'a
+  /// noté. Pas de 5 par défaut : une note inventée se lit comme une note
+  /// méritée.
+  rating      Float?
+  reviewCount Int    @default(0)
+
   openingHours OpeningHour[]
   orders       Order[]
+  reviews      OrderReview[]
 
   staff      User[]
   categories Category[]
@@ -505,7 +515,8 @@ model MenuItem {
   isSpicy      Boolean @default(false)
 
   preparationMinutes Int   @default(20)
-  rating             Float @default(5)
+  /// Note moyenne, nulle tant qu'aucun avis n'a été laissé.
+  rating             Float?
   reviewCount        Int   @default(0)
   /// Compteur de commandes, maintenu à la création de commande.
   ordersCount Int @default(0)
@@ -518,6 +529,7 @@ model MenuItem {
   favorites    Favorite[]
   cartItems    CartItem[]
   orderItems   OrderItem[]
+  reviews      OrderItemReview[]
   recipe       RecipeIngredient[]
 
   @@index([categoryId])
@@ -727,6 +739,7 @@ model Order {
   payment     Payment?
   delivery    Delivery?
   couponUsage CouponUsage?
+  review      OrderReview?
 
   @@index([customerId])
   @@index([status])
@@ -756,6 +769,7 @@ model OrderItem {
   lineTotal Int
 
   options OrderItemOption[]
+  review  OrderItemReview?
 
   @@index([orderId])
   @@map("order_items")
@@ -928,13 +942,84 @@ model DriverLocation {
   @@map("driver_locations")
 }
 
+/// L'avis d'un client sur une commande livrée.
+///
+/// Un seul par commande : il porte la note de la maison, celle du livreur
+/// s'il y en a eu un, et une note par plat (voir [OrderItemReview]). Les
+/// moyennes des maisons, des livreurs et des plats sont recalculées à
+/// chaque avis déposé — elles ne sont jamais saisies à la main.
+///
+/// Les notes de plats vivaient dans le téléphone et n'arrivaient nulle
+/// part : une étoile qui ne compte pour rien est un mensonge.
+model OrderReview {
+  id      String @id @default(uuid())
+  orderId String @unique
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  customerId   String
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  /// La note de la maison, de 1 à 5.
+  restaurantRating Int
+
+  /// Le livreur, s'il y en a eu un — un retrait sur place n'en a pas.
+  driverId     String?
+  driver       DriverProfile? @relation(fields: [driverId], references: [id], onDelete: SetNull)
+  driverRating Int?
+
+  comment String?
+
+  items OrderItemReview[]
+
+  createdAt DateTime @default(now())
+
+  @@index([restaurantId])
+  @@index([driverId])
+  @@index([customerId])
+  @@map("order_reviews")
+}
+
+/// La note d'un plat, dans l'avis d'une commande.
+model OrderItemReview {
+  id       String      @id @default(uuid())
+  reviewId String
+  review   OrderReview @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+
+  orderItemId String    @unique
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  /// Le plat noté. Nul si le plat a été retiré de la carte depuis : la
+  /// note reste lisible dans l'avis, elle ne pèse plus sur une moyenne.
+  menuItemId String?
+  menuItem   MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+
+  rating Int
+
+  @@index([menuItemId])
+  @@map("order_item_reviews")
+}
+
 /// Code OTP remis au client et saisi par le livreur à la remise du repas.
 model DeliveryVerificationCode {
   id         String   @id @default(uuid())
   deliveryId String   @unique
   delivery   Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
 
-  /// Le code n'est jamais stocké en clair.
+  /*
+   * Le code, tel que le client doit pouvoir le lire.
+   *
+   * Il a longtemps été stocké haché seulement — mais la notification
+   * envoyée au client le porte en clair, corps et données comprises, dans
+   * cette même base. Le hachage ne protégeait donc rien, et coûtait
+   * l'essentiel : le client ne pouvait plus retrouver son code une fois la
+   * notification balayée, et la remise restait bloquée.
+   *
+   * Il n'est lisible que par le client destinataire. Le livreur ne le
+   * reçoit jamais : il saisit ce qu'on lui dit, et le serveur compare.
+   */
+  code          String?
+  /// Conservé pour la comparaison à temps constant.
   codeHash      String
   attempts      Int       @default(0)
   maxAttempts   Int       @default(5)
@@ -958,6 +1043,8 @@ model Promotion {
   name        String
   description String?
   code        String  @unique
+  /// Visuel de la carte promotionnelle. Vide : la carte s'affiche sans image.
+  imageUrl    String?
 
   type PromotionType
   /// Pourcentage (0-100) ou montant fixe en GNF, selon `type`.

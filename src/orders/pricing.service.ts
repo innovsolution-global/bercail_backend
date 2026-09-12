@@ -75,13 +75,41 @@ export class PricingService {
       throw AppException.badRequest(ERROR_CODES.CART_EMPTY, 'Votre panier est vide.');
     }
 
-    const restaurant = await this.settings.getRestaurantCached();
-
     const menuItemIds = [...new Set(input.lines.map((line) => line.menuItemId))];
     const items = await client.menuItem.findMany({
       where: { id: { in: menuItemIds }, deletedAt: null },
       include: { optionGroups: { include: { options: true } } },
     });
+
+    /*
+     * **La maison dont on applique les frais est celle des plats.**
+     *
+     * Le devis chiffrait chez la maison du contexte — celle qui sert la
+     * carte au client au moment de l'appel. Or un panier se remplit
+     * avant de se payer : entre les deux, le client peut enregistrer une
+     * adresse plus proche d'une autre maison, et sa carte change sous
+     * ses pieds. Son panier, lui, contient toujours les plats de la
+     * première ; chiffrés chez la seconde, ils étaient « introuvables »,
+     * et l'écran du panier tombait en erreur sans qu'on puisse même le
+     * vider.
+     *
+     * Les plats désignent donc leur cuisine, et c'est **ses** frais,
+     * **son** minimum et **son** temps de préparation qui s'appliquent.
+     * Deux cuisines dans un même devis sont refusées : on ne facture pas
+     * un plat de Kipé au tarif de livraison de Kaloum.
+     */
+    const cuisines = [...new Set(items.map((item) => item.restaurantId))];
+    if (cuisines.length > 1) {
+      throw AppException.badRequest(
+        ERROR_CODES.VALIDATION_ERROR,
+        'Votre panier contient des plats de deux établissements différents. ' +
+          'Videz-le et recommencez pour commander dans un seul.',
+      );
+    }
+    const restaurant =
+      cuisines.length === 1
+        ? await this.settings.byId(cuisines[0])
+        : await this.settings.getRestaurantCached();
 
     const itemById = new Map(items.map((item) => [item.id, item]));
     const lines: PricedLine[] = [];
@@ -147,6 +175,7 @@ export class PricingService {
       input.promotionCode ?? null,
       subtotal,
       deliveryFee,
+      restaurant.id,
       input.customerId,
     );
 
@@ -266,12 +295,17 @@ export class PricingService {
     code: string | null,
     subtotal: number,
     deliveryFee: number,
+    restaurantId: string,
     customerId?: string,
   ): Promise<{ discount: number; promotion: PriceQuote['promotion'] }> {
     if (!code) return { discount: 0, promotion: null };
 
     const promotion = await client.promotion.findFirst({
-      where: { code: code.trim().toUpperCase(), deletedAt: null },
+      // Une remise est offerte par une maison, sur ses propres marges :
+      // un code de la seconde adresse ne doit pas entamer la recette de
+      // la première. Le client n'appartenant à aucun établissement, rien
+      // ne posait ce filtre pour lui.
+      where: { code: code.trim().toUpperCase(), restaurantId, deletedAt: null },
     });
 
     if (!promotion || !promotion.isActive) {

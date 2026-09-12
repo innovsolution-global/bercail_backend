@@ -38,11 +38,22 @@ export type OrderSummaryRow = Order & {
 
 /** Commande complète, telle que chargée pour un détail ou un suivi. */
 export type OrderWithRelations = Omit<OrderSummaryRow, 'items'> & {
+  delivery?: DeliveryWithDriver | null;
   address?: Address | null;
   servedBy?: Pick<User, 'firstName' | 'lastName'> | null;
   items?: (OrderItem & { options: OrderItemOption[] })[];
   history?: (OrderStatusHistory & { actor?: Pick<User, 'firstName' | 'lastName'> | null })[];
   payment?: Payment | null;
+  /** La maison qui prépare : de quoi la nommer et la poser sur un plan. */
+  restaurant?: { id: string; name: string; latitude: number; longitude: number } | null;
+  /** L'avis du client, s'il l'a donné. */
+  review?: {
+    id: string;
+    restaurantRating: number;
+    driverRating: number | null;
+    comment: string | null;
+    items: { orderItemId: string; rating: number }[];
+  } | null;
 };
 
 function customerName(order: OrderSummaryRow): string {
@@ -115,9 +126,24 @@ export function toOrderSummary(order: OrderSummaryRow) {
     driverId: order.delivery?.driverId ?? null,
     driverName: driverName(order),
     createdAt: order.createdAt.toISOString(),
+    /*
+     * Les lignes, en version courte.
+     *
+     * Le détail en rend bien davantage — prix, options, notes. Ici on
+     * se limite à ce qu'une vignette et un résumé demandent : alourdir
+     * une liste de vingt commandes des options de chaque plat coûterait
+     * cher pour rien.
+     */
+    items: (order.items ?? []).map((item) => ({
+      menuItemId: 'menuItemId' in item ? item.menuItemId : null,
+      name: 'name' in item ? item.name : '',
+      imageUrl: 'imageUrl' in item ? item.imageUrl : null,
+      quantity: item.quantity,
+    })),
   };
 }
 
+/** Détail complet d'une commande. */
 export function toOrderDetail(order: OrderWithRelations) {
   return {
     ...toOrderSummary(order),
@@ -131,6 +157,16 @@ export function toOrderDetail(order: OrderWithRelations) {
       note: item.note,
       lineTotal: item.lineTotal,
       options: item.options.map((option) => ({
+        /*
+         * L'identifiant de l'option, pour **recommander à l'identique**.
+         *
+         * Sans lui, l'application ne pouvait renvoyer que le plat, nu :
+         * le serveur exigeait alors de rechoisir « Accompagnement », et
+         * le client relisait « Riz gras » à l'écran sans pouvoir le
+         * redemander. Nul si l'option a disparu de la carte depuis — le
+         * serveur redemandera alors un choix, et ce sera juste.
+         */
+        id: option.optionId,
         groupName: option.groupName,
         optionName: option.optionName,
         extraPrice: option.extraPrice,
@@ -159,12 +195,27 @@ export function toOrderDetail(order: OrderWithRelations) {
     estimatedDeliveryAt: order.estimatedDeliveryAt?.toISOString() ?? null,
     deliveredAt: order.deliveredAt?.toISOString() ?? null,
     cancellationReason: order.cancellationReason,
+    /*
+     * L'avis, s'il a été donné : l'application affiche alors les étoiles
+     * laissées plutôt que de redemander. Nul tant qu'il ne l'est pas — et
+     * c'est le statut « livrée » qui dit si on peut le donner.
+     */
+    review: order.review
+      ? {
+          id: order.review.id,
+          restaurantRating: order.review.restaurantRating,
+          driverRating: order.review.driverRating,
+          comment: order.review.comment,
+          items: order.review.items,
+        }
+      : null,
     updatedAt: order.updatedAt.toISOString(),
   };
 }
 
 /**
  * Vue « suivi de commande » pour le client.
+ *
  * Elle ne contient que ce dont l'écran de suivi a besoin — pas les
  * coordonnées complètes du livreur, seulement son prénom et son numéro.
  */
@@ -184,6 +235,20 @@ export function toOrderTracking(order: OrderWithRelations) {
     estimatedDeliveryAt: order.estimatedDeliveryAt?.toISOString() ?? null,
     deliveredAt: order.deliveredAt?.toISOString() ?? null,
     address: addressDto(order),
+    /*
+     * La maison qui prépare, avec sa position : le plan du suivi doit
+     * montrer d'où part le sac. L'application posait le repère de la
+     * maison **servie au client** — qui n'est plus forcément celle de
+     * la commande, si son adresse par défaut a changé entre-temps.
+     */
+    restaurant: order.restaurant
+      ? {
+          id: order.restaurant.id,
+          name: order.restaurant.name,
+          latitude: order.restaurant.latitude,
+          longitude: order.restaurant.longitude,
+        }
+      : null,
     history: (order.history ?? []).map((event) => ({
       status: toWire(event.status),
       at: event.createdAt.toISOString(),
@@ -224,6 +289,16 @@ export const ORDER_DETAIL_INCLUDE = {
   customer: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
   servedBy: { select: { firstName: true, lastName: true } },
   address: true,
+  restaurant: { select: { id: true, name: true, latitude: true, longitude: true } },
+  review: {
+    select: {
+      id: true,
+      restaurantRating: true,
+      driverRating: true,
+      comment: true,
+      items: { select: { orderItemId: true, rating: true } },
+    },
+  },
   items: { include: { options: true } },
   history: {
     include: { actor: { select: { firstName: true, lastName: true } } },
@@ -245,5 +320,17 @@ export const ORDER_SUMMARY_INCLUDE = {
       driver: { include: { user: { select: { firstName: true, lastName: true, phone: true } } } },
     },
   },
-  items: { select: { quantity: true } },
+  /*
+   * Juste de quoi dessiner une carte de liste : la quantité pour le
+   * compte, le nom pour le résumé, l'image pour la vignette, et
+   * l'identifiant du plat pour « Recommander ».
+   *
+   * La liste n'en rendait que la quantité. Trois conséquences, toutes
+   * silencieuses : la carte s'affichait sans photo, sa ligne de résumé
+   * restait vide, et « Recommander » parcourait une liste de lignes
+   * vide — il ouvrait donc un panier vide sans le moindre message.
+   */
+  items: {
+    select: { quantity: true, name: true, imageUrl: true, menuItemId: true },
+  },
 } satisfies Prisma.OrderInclude;

@@ -1,5 +1,6 @@
 import { ValidationPipe } from '@nestjs/common';
 import { AppException, ERROR_CODES } from '../exceptions/app.exception';
+import { enFrancais } from './validation-messages';
 
 /**
  * Pipe de validation de l'application.
@@ -25,7 +26,14 @@ export function createValidationPipe(): ValidationPipe {
       const fieldErrors: Record<string, string> = {};
       for (const error of errors) {
         const constraints = error.constraints;
-        if (constraints) fieldErrors[error.property] = Object.values(constraints)[0];
+        if (!constraints) continue;
+
+        // `class-validator` écrit en anglais. L'application mobile
+        // affiche le message du serveur tel quel, sans texte de
+        // secours : un livreur a donc pu lire « property
+        // confirmationCode should not exist » en plein service.
+        const [contrainte, message] = Object.entries(constraints)[0];
+        fieldErrors[error.property] = enFrancais(contrainte, error.property, message);
       }
 
       return AppException.unprocessable(

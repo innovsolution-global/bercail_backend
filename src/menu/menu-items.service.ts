@@ -59,7 +59,11 @@ export class MenuItemsService {
 
     // Le catalogue public est très sollicité : on met en cache la page.
     const cacheKey = options.publicOnly
-      ? `${CACHE_PREFIX}:public:${JSON.stringify({ ...query, page: query.page, limit: query.limit })}`
+      ? `${CACHE_PREFIX}:public:${where.restaurantId as string}:${JSON.stringify({
+          ...query,
+          page: query.page,
+          limit: query.limit,
+        })}`
       : null;
 
     const load = async () => {
@@ -86,7 +90,12 @@ export class MenuItemsService {
       where: {
         id,
         deletedAt: null,
-        ...(options.publicOnly ? { category: { isActive: true, deletedAt: null } } : {}),
+        ...(options.publicOnly
+          ? {
+              category: { isActive: true, deletedAt: null },
+              restaurantId: await this.scope.publicRestaurantId(),
+            }
+          : {}),
       },
       include: ITEM_INCLUDE,
     });
@@ -95,18 +104,33 @@ export class MenuItemsService {
     return toMenuItemDto(item);
   }
 
-  /** Sélection éditoriale de l'accueil Flutter, en une seule requête. */
+  /**
+   * Sélection éditoriale de l'accueil Flutter, en une seule requête.
+   *
+   * Route publique de bout en bout : elle ne sert que l'établissement
+   * montré au client, jamais un plat d'une autre maison au milieu des
+   * incontournables.
+   */
   async highlights() {
-    return this.redis.remember(`${CACHE_PREFIX}:highlights`, this.ttl, async () => {
+    const restaurantId = await this.scope.publicRestaurantId();
+
+    return this.redis.remember(`${CACHE_PREFIX}:highlights:${restaurantId}`, this.ttl, async () => {
       const [popular, suggestions] = await Promise.all([
         this.prisma.menuItem.findMany({
-          where: { deletedAt: null, isAvailable: true, isPopular: true, category: { isActive: true } },
+          where: {
+            restaurantId,
+            deletedAt: null,
+            isAvailable: true,
+            isPopular: true,
+            category: { isActive: true },
+          },
           include: ITEM_INCLUDE,
           orderBy: { ordersCount: 'desc' },
           take: 10,
         }),
         this.prisma.menuItem.findMany({
           where: {
+            restaurantId,
             deletedAt: null,
             isAvailable: true,
             isSuggestion: true,
@@ -401,6 +425,8 @@ export class MenuItemsService {
     if (publicOnly) {
       where.isAvailable = true;
       where.category = { isActive: true, deletedAt: null };
+      // Un client lit la carte d'une maison, pas la somme de toutes.
+      where.restaurantId = await this.scope.publicRestaurantId();
     } else if (query.availability === 'available') {
       where.isAvailable = true;
     } else if (query.availability === 'unavailable') {
@@ -410,8 +436,15 @@ export class MenuItemsService {
     if (query.categoryId && query.categoryId !== 'all') {
       // On accepte l'identifiant ou le slug : l'application mobile
       // navigue par slug, le back-office par identifiant.
+      // Le slug se répète d'un établissement à l'autre — « grillades »
+      // existe dans les deux — donc la recherche est ramenée à la même
+      // maison que le reste de la requête, sans quoi « Grillades »
+      // ouvrirait la catégorie de l'autre.
       const category = await this.prisma.category.findFirst({
-        where: { OR: [{ id: query.categoryId }, { slug: query.categoryId }] },
+        where: {
+          OR: [{ id: query.categoryId }, { slug: query.categoryId }],
+          ...(where.restaurantId ? { restaurantId: where.restaurantId as string } : {}),
+        },
         select: { id: true },
       });
       where.categoryId = category?.id ?? query.categoryId;

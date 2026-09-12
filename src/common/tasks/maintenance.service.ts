@@ -5,6 +5,7 @@ import { AuditService } from '../../audit/audit.service';
 import { TokenService } from '../../auth/token.service';
 import { PrismaService } from '../../database/prisma.service';
 import { SettingsService } from '../../settings/settings.service';
+import { OrdersService } from '../../orders/orders.service';
 import { IdempotencyService } from '../services/idempotency.service';
 
 /**
@@ -30,7 +31,25 @@ export class MaintenanceService {
     private readonly audit: AuditService,
     private readonly idempotency: IdempotencyService,
     private readonly settings: SettingsService,
+    private readonly orders: OrdersService,
   ) {}
+
+  /**
+   * Une commande en ligne qui n'a pas été payée en 45 minutes est
+   * annulée.
+   *
+   * Le client a eu le temps de revenir sur la page de l'opérateur, de
+   * réessayer, de changer de moyen. Au-delà, la commande n'aura pas
+   * lieu — et la laisser « en attente » pour toujours encombrait sa
+   * liste, celle du restaurant, et retenait un coupon.
+   */
+  @Cron(CronExpression.EVERY_5_MINUTES)
+  async expireUnpaidOrders(): Promise<void> {
+    const count = await this.orders.expireUnpaid(45);
+    if (count > 0) {
+      this.logger.log(`${count} commande(s) en ligne annulée(s) faute de paiement.`);
+    }
+  }
 
   @Cron(CronExpression.EVERY_HOUR)
   async purgeExpiredTokens(): Promise<void> {

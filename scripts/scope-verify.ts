@@ -9,11 +9,26 @@
  *
  * Le script nettoie derrière lui : il est sans effet durable.
  */
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, sep } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import { restaurantContext } from '../src/common/context/restaurant-context';
+import { restaurantFilter } from '../src/common/context/restaurant-sql';
 import { withRestaurantScope } from '../src/database/restaurant-scope.extension';
 
 const prisma = withRestaurantScope(new PrismaClient()) as PrismaClient;
+
+/**
+ * Un gabarit SQL complet, dos d'apostrophes compris.
+ *
+ * `Prisma.sql` compte autant que `$queryRaw` : le journal unifié des
+ * finances est un fragment de ce type, assemblé à part puis inséré dans
+ * deux requêtes. Un oubli de filtre y passerait deux fois.
+ */
+const RAW_TEMPLATE = /(?:[$](?:query|execute)Raw|Prisma[.]sql)[^`]*`[^`]*`/g;
+
+/** Tout ce qui n'est pas un identifiant SQL sépare deux mots. */
+const SEPARATEURS = /[^a-z_]+/;
 
 async function main() {
   let echecs = 0;
@@ -77,6 +92,25 @@ async function main() {
     const sienne = await prisma.expense.findUnique({ where: { id: depenseAlpha.id } });
     verifie('la sienne, elle, se lit normalement', sienne?.id === depenseAlpha.id);
 
+    /*
+     * Le SQL ecrit a la main.
+     *
+     * C'est le trou que l'extension Prisma ne bouche pas : une requete
+     * brute part telle quelle vers PostgreSQL. C'est par la qu'un
+     * indicateur et sa courbe ont affiche deux chiffres differents sur le
+     * meme ecran, le plus gros etant le faux.
+     */
+    const brut = await prisma.$queryRaw<{ somme: number }[]>`
+      SELECT COALESCE(SUM(amount), 0)::int AS somme
+      FROM expenses
+      WHERE reference LIKE 'T-%'
+        AND ${restaurantFilter()}
+    `;
+    verifie(
+      `une requete SQL brute filtree ignore Beta (${brut[0]?.somme})`,
+      Number(brut[0]?.somme) === 100_000,
+    );
+
     // Une création sans établissement désigné reçoit celui du périmètre.
     const creee = await prisma.expense.create({
       data: { reference: `T-C-${marque}`, label: 'Sans établissement', category: 'EAU', amount: 1 },
@@ -89,7 +123,24 @@ async function main() {
   await restaurantContext.unscoped(async () => {
     const toutes = await prisma.expense.findMany({ where: { reference: { startsWith: 'T-' } } });
     verifie(`le propriétaire voit les deux établissements (${toutes.length})`, toutes.length === 2);
+
+    // Hors perimetre, le meme fragment ne doit rien retrancher.
+    const brut = await prisma.$queryRaw<{ somme: number }[]>`
+      SELECT COALESCE(SUM(amount), 0)::int AS somme
+      FROM expenses
+      WHERE reference LIKE 'T-%'
+        AND ${restaurantFilter()}
+    `;
+    verifie(
+      `la meme requete brute cumule les deux (${brut[0]?.somme})`,
+      Number(brut[0]?.somme) === 300_000,
+    );
   });
+
+  // ---- Aucune requete brute oubliee ----
+  for (const [fichier, tables] of requetesBrutesSansFiltre()) {
+    verifie(`${fichier} : requete brute sans filtre sur ${tables}`, false);
+  }
 
   // ---- Ménage ----
   await prisma.expense.deleteMany({ where: { reference: { startsWith: `T-` , endsWith: String(marque) } } });
@@ -97,6 +148,66 @@ async function main() {
 
   console.log(echecs === 0 ? '\n✅ Le cloisonnement tient.' : `\n❌ ${echecs} fuite(s) détectée(s).`);
   process.exitCode = echecs === 0 ? 0 : 1;
+}
+
+/**
+ * Recense les requêtes SQL brutes qui interrogent une table cloisonnée
+ * sans filtre d'établissement.
+ *
+ * Un contrôle à l'exécution ne peut pas couvrir une requête qu'on n'a pas
+ * pensé à appeler : celui-ci lit le code et ne laisse donc pas passer une
+ * requête ajoutée demain. C'est la seule protection possible ici —
+ * l'extension Prisma, elle, ne voit jamais une requête brute.
+ */
+function requetesBrutesSansFiltre(): [string, string][] {
+  const TABLES_CLOISONNEES = [
+    'orders', 'order_items', 'expenses', 'incomes', 'stock_items', 'stock_movements',
+    'purchases', 'employees', 'promotions', 'menu_items', 'categories', 'suppliers',
+    'deliveries',
+  ];
+
+  const oublis: [string, string][] = [];
+
+  const parcourir = (dossier: string) => {
+    for (const entree of readdirSync(dossier)) {
+      const chemin = join(dossier, entree);
+      if (statSync(chemin).isDirectory()) {
+        parcourir(chemin);
+        continue;
+      }
+      if (!entree.endsWith('.ts') || entree.endsWith('.spec.ts')) continue;
+      // Le fichier qui définit le filtre interroge `orders` sans s'appeler
+      // lui-même : c'est le seul faux positif, et il est attendu.
+      if (entree === 'restaurant-sql.ts') continue;
+
+      const source = readFileSync(chemin, 'utf8');
+
+      // Chaque gabarit `$queryRaw` / `$executeRaw` jusqu'à son dos d'apostrophe final.
+      for (const bloc of source.match(RAW_TEMPLATE) ?? []) {
+        /*
+         * Découpage en mots plutôt qu'expression régulière par table : une
+         * table n'est interrogée que si son nom suit immédiatement `FROM`
+         * ou `JOIN`, ce qu'une recherche de sous-chaîne confondrait avec
+         * une simple mention en commentaire.
+         */
+        const mots = bloc.toLowerCase().split(SEPARATEURS);
+
+        const touchees = TABLES_CLOISONNEES.filter((table) =>
+          mots.some(
+            (mot, index) =>
+              mot === table && (mots[index - 1] === 'from' || mots[index - 1] === 'join'),
+          ),
+        );
+
+        if (touchees.length > 0 && !bloc.includes('restaurantFilter')) {
+          oublis.push([chemin.split(sep).join('/'), touchees.join(', ')]);
+        }
+      }
+    }
+  };
+
+  parcourir(join(__dirname, '..', 'src'));
+  return oublis;
 }
 
 main()

@@ -36,7 +36,9 @@ import {
   QuoteOrderDto,
   UpdateOrderStatusDto,
 } from './dto/order.dto';
+import { CreateReviewDto } from './dto/review.dto';
 import { OrdersService } from './orders.service';
+import { ReviewsService } from './reviews.service';
 
 /**
  * Commandes — route unique pour les quatre rôles.
@@ -51,6 +53,7 @@ export class OrdersController {
   constructor(
     private readonly orders: OrdersService,
     private readonly carts: CartsService,
+    private readonly reviews: ReviewsService,
   ) {}
 
   @Post()
@@ -193,6 +196,32 @@ export class OrdersController {
     @Ctx() context: RequestContext,
   ) {
     return this.orders.updateStatus(user, id, dto, context);
+  }
+
+  @Get(':id/review')
+  @ApiEndpoint({
+    summary: 'L’avis laissé sur une commande',
+    description: 'Nul tant que le client n’a pas noté. Le client lit le sien, le back-office tous, le livreur celui de ses courses.',
+    roles: [Role.CUSTOMER, Role.DRIVER, Role.ADMIN, Role.SUPER_ADMIN],
+  })
+  review(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.reviews.forOrder(user, id);
+  }
+
+  @Post(':id/review')
+  @Roles(Role.CUSTOMER)
+  @ApiEndpoint({
+    summary: 'Noter une commande livrée',
+    description:
+      'Une seule fois, par le client destinataire, une fois la commande remise : la maison (obligatoire), le livreur s’il y en a eu un, et les plats un par un. Les moyennes sont recalculées aussitôt.',
+    roles: [Role.CUSTOMER],
+  })
+  createReview(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() dto: CreateReviewDto,
+  ) {
+    return this.reviews.create(user, id, dto);
   }
 
   @Post(':id/cancel')

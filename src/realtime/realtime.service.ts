@@ -20,8 +20,17 @@ export class RealtimeService {
    * Salons d'une commande. `customerId` est nul pour une vente au
    * comptoir : il n'y a alors personne à prévenir côté client.
    */
-  private orderRooms(id: string, customerId: string | null | undefined): string[] {
+  private orderRooms(
+    id: string,
+    customerId: string | null | undefined,
+    restaurantId?: string | null,
+  ): string[] {
+    // Le propriétaire voit tout ; le gérant, seulement les commandes de
+    // son adresse. Sans `restaurantId`, l'événement ne sort pas du
+    // salon de l'enseigne : mieux vaut une alerte manquante qu'une
+    // commande annoncée à une cuisine qui ne la prépare pas.
     const rooms = [ROOMS.backOffice(), ROOMS.order(id)];
+    if (restaurantId) rooms.push(ROOMS.restaurant(restaurantId));
     if (customerId) rooms.push(ROOMS.user(customerId));
     return rooms;
   }
@@ -41,18 +50,24 @@ export class RealtimeService {
     id: string;
     customerId: string | null;
     reference: string;
+    restaurantId?: string | null;
     [key: string]: unknown;
   }): void {
     this.emit(
-      this.orderRooms(payload.id, payload.customerId),
+      this.orderRooms(payload.id, payload.customerId, payload.restaurantId),
       REALTIME_EVENTS.ORDER_CREATED,
       payload,
     );
   }
 
-  orderUpdated(payload: { id: string; customerId: string | null; [key: string]: unknown }): void {
+  orderUpdated(payload: {
+    id: string;
+    customerId: string | null;
+    restaurantId?: string | null;
+    [key: string]: unknown;
+  }): void {
     this.emit(
-      this.orderRooms(payload.id, payload.customerId),
+      this.orderRooms(payload.id, payload.customerId, payload.restaurantId),
       REALTIME_EVENTS.ORDER_UPDATED,
       payload,
     );
@@ -91,9 +106,10 @@ export class RealtimeService {
     status: string;
     customerId: string | null;
     driverProfileId?: string | null;
+    restaurantId?: string | null;
     [key: string]: unknown;
   }): void {
-    const rooms = this.orderRooms(payload.orderId, payload.customerId);
+    const rooms = this.orderRooms(payload.orderId, payload.customerId, payload.restaurantId);
     if (payload.driverProfileId) rooms.push(ROOMS.driver(payload.driverProfileId));
     this.emit(rooms, REALTIME_EVENTS.DELIVERY_STATUS_UPDATED, payload);
   }
@@ -108,23 +124,31 @@ export class RealtimeService {
   driverLocationUpdated(payload: {
     driverProfileId: string;
     orderId?: string | null;
+    restaurantId?: string | null;
     latitude: number;
     longitude: number;
     heading?: number | null;
     speed?: number | null;
     recordedAt: string;
   }): void {
+    // Le propriétaire suit toute la flotte ; un gérant, celle de sa
+    // maison. Depuis que les gérants ont quitté le salon de l'enseigne,
+    // c'est le salon de l'établissement qui leur porte la position.
     const rooms = [ROOMS.backOffice()];
+    if (payload.restaurantId) rooms.push(ROOMS.restaurant(payload.restaurantId));
     if (payload.orderId) rooms.push(ROOMS.order(payload.orderId));
     this.emit(rooms, REALTIME_EVENTS.DRIVER_LOCATION_UPDATED, payload);
   }
 
   driverStatusUpdated(payload: {
     driverProfileId: string;
+    restaurantId?: string | null;
     isOnline: boolean;
     isAvailable: boolean;
   }): void {
-    this.emit([ROOMS.backOffice()], REALTIME_EVENTS.DRIVER_STATUS_UPDATED, payload);
+    const rooms = [ROOMS.backOffice()];
+    if (payload.restaurantId) rooms.push(ROOMS.restaurant(payload.restaurantId));
+    this.emit(rooms, REALTIME_EVENTS.DRIVER_STATUS_UPDATED, payload);
   }
 
   paymentUpdated(payload: {
@@ -147,6 +171,11 @@ export class RealtimeService {
 
   notifyRole(role: Role, event: string, payload: unknown): void {
     this.emit([ROOMS.role(role)], event, payload);
+  }
+
+  /** Les gérants d'un établissement, et eux seuls. */
+  notifyRestaurant(restaurantId: string, event: string, payload: unknown): void {
+    this.emit([ROOMS.restaurant(restaurantId)], event, payload);
   }
 
   systemAlert(payload: unknown): void {

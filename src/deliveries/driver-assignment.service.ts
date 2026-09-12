@@ -24,12 +24,26 @@ export class DriverAssignmentService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Livreurs proposables pour une commande donnée. */
+  /**
+   * Livreurs proposables pour une commande donnée.
+   *
+   * **Ceux de l'établissement qui prépare la commande**, et eux seuls.
+   * Sans ce filtre, le gérant de Kaloum pouvait envoyer un livreur de
+   * Kipé chercher un plat cuisiné chez lui, à vingt kilomètres de là —
+   * et deux maisons pouvaient dépêcher chacune le sien sur la même
+   * adresse.
+   */
   async assignable(options: { orderId?: string; zone?: string; limit?: number } = {}) {
+    const maison = options.orderId ? await this.restaurantOf(options.orderId) : null;
+
     const where: Prisma.DriverProfileWhereInput = {
       isOnline: true,
       isAvailable: true,
-      user: { status: AccountStatus.ACTIVE, deletedAt: null },
+      user: {
+        status: AccountStatus.ACTIVE,
+        deletedAt: null,
+        ...(maison ? { restaurantId: maison } : {}),
+      },
       ...(options.zone && options.zone !== 'all' ? { zone: options.zone } : {}),
     };
 
@@ -77,6 +91,14 @@ export class DriverAssignmentService {
         }
         if (left.distanceKm === null && right.distanceKm !== null) return 1;
         if (left.distanceKm !== null && right.distanceKm === null) return -1;
+
+        /*
+         * Dernier départage, la note — et seulement entre deux livreurs
+         * réellement notés. Compter une note absente comme zéro reléguerait
+         * systématiquement les nouveaux en fin de liste, ce qui les
+         * empêcherait d'obtenir la course qui leur donnerait une note.
+         */
+        if (left.rating === null || right.rating === null) return 0;
         return right.rating - left.rating;
       });
   }
@@ -85,10 +107,39 @@ export class DriverAssignmentService {
    * Vérifie qu'un livreur peut recevoir une course.
    * Appelée dans la transaction d'assignation, jamais avant.
    */
-  async assertAssignable(driverId: string, client: Prisma.TransactionClient = this.prisma) {
+  /** L'établissement qui prépare une commande. */
+  private async restaurantOf(orderId: string): Promise<string | null> {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { restaurantId: true },
+    });
+
+    return order?.restaurantId ?? null;
+  }
+
+  /**
+   * @param restaurantId L'établissement de la commande. Un livreur d'une
+   *   autre adresse est refusé : il partirait d'une cuisine qui n'a pas
+   *   le plat.
+   */
+  async assertAssignable(
+    driverId: string,
+    client: Prisma.TransactionClient = this.prisma,
+    restaurantId?: string | null,
+  ) {
     const driver = await client.driverProfile.findUnique({
       where: { id: driverId },
-      include: { user: { select: { status: true, deletedAt: true, firstName: true, lastName: true } } },
+      include: {
+        user: {
+          select: {
+            status: true,
+            deletedAt: true,
+            firstName: true,
+            lastName: true,
+            restaurantId: true,
+          },
+        },
+      },
     });
 
     if (!driver || driver.user.deletedAt) {
@@ -113,6 +164,20 @@ export class DriverAssignmentService {
       throw AppException.conflict(
         ERROR_CODES.DRIVER_UNAVAILABLE,
         `${driver.user.firstName} n'est pas en ligne actuellement.`,
+      );
+    }
+
+    // Le dernier verrou, posé dans la transaction d'attribution : la
+    // liste proposée est déjà cloisonnée, mais rien n'empêche d'appeler
+    // la route avec l'identifiant d'un livreur d'une autre adresse.
+    if (
+      restaurantId &&
+      driver.user.restaurantId &&
+      driver.user.restaurantId !== restaurantId
+    ) {
+      throw AppException.conflict(
+        ERROR_CODES.DRIVER_UNAVAILABLE,
+        `${driver.user.firstName} est rattaché à un autre établissement.`,
       );
     }
 
@@ -169,13 +234,23 @@ export class DriverAssignmentService {
     });
   }
 
-  /** Statut agrégé affiché dans le back-office. */
+  /**
+   * Statut agrégé affiché dans le back-office.
+   *
+   * « En course » se déduit des courses en cours, jamais de la seule
+   * disponibilité : un livreur en pause n'est pas en train de livrer, et
+   * l'annoncer ainsi contredit le compteur affiché juste à côté.
+   */
   workState(driver: {
     user: { status: AccountStatus };
+    isOnline: boolean;
     isAvailable: boolean;
-  }): 'available' | 'busy' | 'suspended' {
+    activeDeliveries: number;
+  }): 'available' | 'busy' | 'paused' | 'suspended' | 'offline' {
     if (driver.user.status === AccountStatus.SUSPENDED) return 'suspended';
-    return driver.isAvailable ? 'available' : 'busy';
+    if (driver.activeDeliveries > 0) return 'busy';
+    if (!driver.isOnline) return 'offline';
+    return driver.isAvailable ? 'available' : 'paused';
   }
 
   /** Statuts de livraison considérés comme actifs (réexporté par commodité). */

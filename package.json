@@ -31,7 +31,10 @@
     "sync:verify": "ts-node --transpile-only scripts/sync-verify.ts",
     "scope:verify": "ts-node --transpile-only scripts/scope-verify.ts",
     "restaurant:open": "ts-node --transpile-only scripts/open-restaurant.ts",
-    "db:setup": "prisma migrate deploy && npm run seed"
+    "db:setup": "prisma migrate deploy && npm run seed",
+    "tunnel": "npx --yes localtunnel --port 3000 --subdomain ziza-local",
+    "admins:verify": "ts-node --transpile-only scripts/admins-verify.ts",
+    "proximite:verify": "ts-node --transpile-only scripts/proximite-verify.ts"
   },
   "prisma": {
     "seed": "ts-node --transpile-only prisma/seed.ts"

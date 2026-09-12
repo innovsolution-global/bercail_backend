@@ -580,8 +580,15 @@ export class DriversService {
 
   /**
    * Passage en ligne / hors ligne.
-   * Un livreur ne peut pas se déclarer disponible tant qu'il a une course
-   * active : la disponibilité est déduite du travail en cours.
+   *
+   * La disponibilité est **déduite** du travail en cours, dans les deux
+   * sens : une course active la refuse, et se mettre en ligne sans course
+   * l'accorde. C'est ce second sens qui manquait — l'application livreur
+   * n'envoie que `isOnline`, et la disponibilité restait alors à sa
+   * dernière valeur. Un livreur qui terminait sa journée hors ligne
+   * repassait en ligne le lendemain en restant marqué indisponible : il
+   * n'apparaissait plus jamais dans la liste d'attribution, sans que rien
+   * ne le signale ni à lui ni au back-office.
    */
   async updateAvailability(
     user: AuthenticatedUser,
@@ -596,8 +603,14 @@ export class DriversService {
     });
 
     const isOnline = dto.isOnline;
-    const isAvailable =
-      active > 0 ? false : (dto.isAvailable ?? (isOnline === false ? false : undefined));
+
+    /*
+     * Une course en cours l'emporte sur tout. Sinon, un choix explicite
+     * du livreur prime, et à défaut la disponibilité suit la présence.
+     * `undefined` — un simple battement de cœur sans `isOnline` — ne
+     * touche à rien.
+     */
+    const isAvailable = active > 0 ? false : (dto.isAvailable ?? isOnline);
 
     const profile = await this.prisma.driverProfile.update({
       where: { id: user.driverProfileId },
@@ -611,6 +624,7 @@ export class DriversService {
 
     this.realtime.driverStatusUpdated({
       driverProfileId: profile.id,
+      restaurantId: user.restaurantId ?? null,
       isOnline: profile.isOnline,
       isAvailable: profile.isAvailable,
     });
@@ -662,6 +676,18 @@ export class DriversService {
       completedToday: todayCompleted,
       earningsToday: todayFees._sum.deliveryFee ?? 0,
       rating: profile.rating,
+      /*
+       * Sa fiche : véhicule, plaque, zone, ancienneté.
+       *
+       * Ces champs existaient sur le profil mais n'étaient servis qu'au
+       * back-office. Le livreur voyait donc, sur son propre écran, une
+       * moto et une zone écrites en dur dans l'application — les mêmes
+       * pour tout le monde.
+       */
+      vehicleType: toWire(profile.vehicleType),
+      plateNumber: profile.plateNumber,
+      zone: profile.zone,
+      since: profile.createdAt.toISOString(),
       stats: await this.stats(profile.id),
     };
   }
@@ -698,17 +724,36 @@ export class DriversService {
       zone: driver.zone,
       status: toWire(driver.user.status),
       availability: driver.isOnline ? 'online' : 'offline',
-      workState:
-        driver.user.status === AccountStatus.SUSPENDED
-          ? 'suspended'
-          : driver.isAvailable
-            ? 'available'
-            : 'busy',
+      /*
+       * « En course » se déduit des courses, pas de la disponibilité.
+       *
+       * Les deux étaient confondus : un livreur indisponible était
+       * annoncé « en course », y compris affiché juste à côté d'un
+       * « Courses en cours : 0 » qui le démentait. Un livreur peut être
+       * en ligne sans prendre de course — c'est une pause, et elle a
+       * maintenant son propre état.
+       */
+      workState: this.workState(driver),
       rating: driver.rating,
       completedDeliveries: driver.completedDeliveries,
       activeDeliveries: driver._count?.deliveries ?? 0,
       lastSeenAt: driver.lastSeenAt?.toISOString() ?? null,
       createdAt: driver.user.createdAt.toISOString(),
     };
+  }
+
+  /**
+   * État de travail affiché dans le back-office.
+   *
+   * L'ordre compte : une suspension prime sur tout, puis le travail
+   * réellement en cours, puis la disponibilité déclarée. Un livreur hors
+   * ligne n'est pas « en pause » — l'interface affiche déjà sa présence à
+   * côté, et doubler l'information la brouille.
+   */
+  private workState(driver: DriverRow): 'available' | 'busy' | 'paused' | 'suspended' | 'offline' {
+    if (driver.user.status === AccountStatus.SUSPENDED) return 'suspended';
+    if ((driver._count?.deliveries ?? 0) > 0) return 'busy';
+    if (!driver.isOnline) return 'offline';
+    return driver.isAvailable ? 'available' : 'paused';
   }
 }

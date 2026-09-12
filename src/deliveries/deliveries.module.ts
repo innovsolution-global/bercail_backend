@@ -6,13 +6,16 @@ import {
   OrderAssignmentController,
 } from './deliveries.controller';
 import { DeliveriesService } from './deliveries.service';
-import { DeliveryVerificationService } from './delivery-verification.service';
 import { DriverAssignmentService } from './driver-assignment.service';
 
 @Module({
   imports: [OrdersModule],
-  controllers: [DeliveriesController, OrderAssignmentController, DriverDeliveriesController],
-  providers: [DeliveriesService, DriverAssignmentService, DeliveryVerificationService],
-  exports: [DeliveriesService, DriverAssignmentService, DeliveryVerificationService],
+  controllers: [
+    DeliveriesController,
+    OrderAssignmentController,
+    DriverDeliveriesController,
+  ],
+  providers: [DeliveriesService, DriverAssignmentService,],
+  exports: [DeliveriesService, DriverAssignmentService,],
 })
 export class DeliveriesModule {}

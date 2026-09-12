@@ -118,7 +118,8 @@ export interface AuthUserDto {
     zone: string;
     isOnline: boolean;
     isAvailable: boolean;
-    rating: number;
+    /** Nulle tant qu'aucune course n'a été notée. */
+    rating: number | null;
     completedDeliveries: number;
   };
   /** Présent uniquement pour un CUSTOMER. */

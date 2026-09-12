@@ -61,6 +61,30 @@ seed à partir de `SUPER_ADMIN_EMAIL` / `SUPER_ADMIN_PASSWORD`, à changer
 immédiatement. En production, la validation d'environnement refuse de démarrer
 si le mot de passe d'amorçage est resté à sa valeur d'exemple.
 
+### Gérants d'établissement
+
+Chaque établissement a son gérant, rattaché par `restaurantId` : il ne voit
+que le sien, et le serveur le lui impose quoi qu'il demande. Leurs accès
+sont notés dans `.env` sous `ADMIN_<CODE>_EMAIL` / `ADMIN_<CODE>_PASSWORD`,
+où `<CODE>` est la colonne `code` de la table `restaurants` — `BRC`, `BRC2`.
+
+Le seed ne crée que le premier ; les suivants naissent dans le back-office.
+Ces valeurs décrivent donc des comptes **en place**, pas une intention :
+
+```bash
+npm run admins:verify           # empreinte du mot de passe, rôle, état, rattachement
+npm run admins:verify -- --live # + connexion réelle et périmètre appliqué
+```
+
+Le contrôle par défaut se fait en base et ne consomme aucune tentative de
+connexion — la route de connexion est plafonnée à dix essais par cinq
+minutes, et un contrôle qui déclenche lui-même cette protection ne vaut
+rien. `--live` en consomme deux : à réserver aux cas où l'on doute du
+cloisonnement appliqué, pas seulement des identifiants.
+
+À noter : `SUPER_ADMIN_*` est une **entrée du seed**, pas un relevé. Rien
+dans `src/` ne la lit. Le script le rappelle quand elle échoue.
+
 ## Jetons
 
 | Jeton   | Durée   | Contenu                          | Stockage serveur       |

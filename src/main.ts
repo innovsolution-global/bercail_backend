@@ -20,6 +20,11 @@ async function bootstrap(): Promise<void> {
   const logger = new Logger('Bootstrap');
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bufferLogs: false,
+    // Conserve les octets reçus en plus du corps analysé. Les rappels des
+    // opérateurs de paiement se signent sur ces octets exacts : un
+    // `JSON.parse` suivi d'un `JSON.stringify` réordonne les clés et
+    // invaliderait une signature pourtant authentique.
+    rawBody: true,
   });
 
   const config = app.get(ConfigService);
@@ -86,8 +91,17 @@ async function bootstrap(): Promise<void> {
   // Le préfixe porte déjà la version (`api/v1`) : activer en plus le
   // versionnage d'URI produirait `/api/v1/v1/...`.
   app.setGlobalPrefix(prefix, {
-    // Les sondes doivent rester joignables sans préfixe de version.
-    exclude: ['health', 'health/live', 'health/ready'],
+    exclude: [
+      // Les sondes doivent rester joignables sans préfixe de version.
+      'health',
+      'health/live',
+      'health/ready',
+      // Le rappel de l'opérateur de paiement porte l'adresse que nous lui
+      // avons déclarée (`CHAPCHAP_PUBLIC_NOTIFY_PATH`) : la préfixer ici
+      // produirait `/api/v1/v1/webhooks/...`, et l'opérateur appellerait
+      // dans le vide.
+      'v1/webhooks/chapchap',
+    ],
   });
 
   // ── Fichiers téléversés (pilote local) ───────────────────────────────────
@@ -176,6 +190,61 @@ async function bootstrap(): Promise<void> {
     logger.log(`Documentation : http://localhost:${port}/docs`);
   }
   logger.log(`WebSocket : ws://localhost:${port}/realtime`);
+
+  void warnIfCallbackUnreachable(config, logger);
+}
+
+/**
+ * Prévient si Chap Chap ne pourra pas nous rappeler.
+ *
+ * Le rappel signé est ce qui fait passer une commande en payée. S'il
+ * n'arrive pas — tunnel éteint, adresse publique périmée — le client
+ * paie chez son opérateur et la commande reste « en cours »
+ * indéfiniment, **sans le moindre message** : rien n'échoue, tout
+ * attend. C'est le pire mode de panne qui soit, et il se voit ici en
+ * une requête.
+ *
+ * La vérification ne bloque pas le démarrage : elle avertit, et le
+ * serveur tourne. Un développeur qui travaille sur autre chose que le
+ * paiement n'a pas à monter un tunnel pour lancer son API.
+ */
+async function warnIfCallbackUnreachable(
+  config: ConfigService,
+  logger: Logger,
+): Promise<void> {
+  if (config.get<boolean>('payment.chapchap.enabled') !== true) return;
+
+  const publicBase = config.get<string>('payment.chapchap.publicBaseUrl');
+  if (!publicBase) {
+    logger.warn(
+      'CHAPCHAP_PUBLIC_BASE_URL est vide : Chap Chap n’a aucune adresse où ' +
+        'nous rappeler, les paiements resteront « en cours ».',
+    );
+    return;
+  }
+
+  try {
+    const response = await fetch(`${publicBase.replace(/\/$/, '')}/health`, {
+      signal: AbortSignal.timeout(5_000),
+      headers: { 'bypass-tunnel-reminder': '1' },
+    });
+
+    if (!response.ok) {
+      logger.warn(
+        `L’adresse publique ${publicBase} répond ${response.status} : le ` +
+          'rappel de paiement n’arrivera pas. Lancez `npm run tunnel`.',
+      );
+      return;
+    }
+
+    logger.log(`Rappels de paiement attendus sur ${publicBase}`);
+  } catch {
+    logger.warn(
+      `L’adresse publique ${publicBase} est injoignable : le rappel de ` +
+        'paiement n’arrivera pas, et les commandes réglées en ligne ' +
+        'resteront « en cours ». Lancez `npm run tunnel`.',
+    );
+  }
 }
 
 void bootstrap();

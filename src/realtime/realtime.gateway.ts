@@ -71,6 +71,9 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
           id: true,
           role: true,
           status: true,
+          // L'établissement du gérant décide du salon qu'il rejoint :
+          // il ne doit recevoir que les commandes de son adresse.
+          restaurantId: true,
           driverProfile: { select: { id: true } },
         },
       });
@@ -86,8 +89,18 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
       await socket.join(ROOMS.user(user.id));
       await socket.join(ROOMS.role(user.role));
 
-      if (user.role === Role.ADMIN || user.role === Role.SUPER_ADMIN) {
+      /*
+       * Le propriétaire suit toute l'enseigne ; un gérant ne suit que
+       * son adresse. Tant que les deux partageaient le salon
+       * `back-office`, la commande d'un client de Kaloum sonnait aussi
+       * à Kipé, et n'importe quel gérant pouvait la prendre en main.
+       */
+      if (user.role === Role.SUPER_ADMIN) {
         await socket.join(ROOMS.backOffice());
+      }
+
+      if (user.role === Role.ADMIN && user.restaurantId) {
+        await socket.join(ROOMS.restaurant(user.restaurantId));
       }
 
       if (user.role === Role.DRIVER && user.driverProfile) {

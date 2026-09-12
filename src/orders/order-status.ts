@@ -1,4 +1,4 @@
-import { OrderStatus, OrderType, Role } from '@prisma/client';
+import { DeliveryStatus, OrderStatus, OrderType, Role } from '@prisma/client';
 import type { Permission } from '../common/constants/permissions.constant';
 import { AppException, ERROR_CODES } from '../common/exceptions/app.exception';
 
@@ -104,16 +104,63 @@ export function assertTransition(from: OrderStatus, to: OrderStatus, type: Order
     );
   }
 
-  // À l'inverse, une commande à emporter n'a pas de livreur à assigner.
+  // À l'inverse, une commande prise au restaurant n'a pas de livreur à
+  // assigner — qu'elle soit emportée ou consommée sur place.
   if (
     type !== OrderType.DELIVERY &&
     (to === OrderStatus.ASSIGNED || to === OrderStatus.OUT_FOR_DELIVERY)
   ) {
     throw AppException.conflict(
       ERROR_CODES.INVALID_STATUS_TRANSITION,
-      'Une commande à emporter ne se livre pas.',
+      type === OrderType.DINE_IN
+        ? 'Une commande servie sur place ne se livre pas.'
+        : 'Une commande à emporter ne se livre pas.',
     );
   }
+}
+
+/**
+ * Transitions qui appartiennent au livreur une fois la course confiée.
+ *
+ * Tant que personne ne porte la commande, le back-office pilote tout. Dès
+ * qu'un livreur l'a acceptée, la suite décrit **ce qu'il fait** : il a
+ * récupéré le repas, il l'a remis. Laisser le back-office poser ces
+ * statuts en parallèle produit deux récits d'une même course — et le
+ * mauvais est celui qui décide, puisque « livrée » déclenche
+ * l'encaissement à la livraison.
+ *
+ * La remise, en particulier, est prouvée par le code du client. Un clic
+ * depuis un bureau ne prouve rien.
+ */
+const DRIVER_OWNED_TRANSITIONS: OrderStatus[] = [
+  OrderStatus.OUT_FOR_DELIVERY,
+  OrderStatus.DELIVERED,
+];
+
+/**
+ * Refuse au back-office une transition qui revient au livreur.
+ *
+ * Reprendre la main reste possible : détacher le livreur ramène la
+ * commande à « prête », et l'annulation n'est jamais bloquée. C'est la
+ * porte de sortie quand un téléphone tombe en panne.
+ */
+export function assertNotDriverOwned(
+  target: OrderStatus,
+  delivery: { driverId: string | null; status: DeliveryStatus } | null,
+): void {
+  if (!delivery?.driverId) return;
+  if (!DRIVER_OWNED_TRANSITIONS.includes(target)) return;
+
+  // Une course échouée rend la main : le back-office doit pouvoir agir.
+  if (delivery.status === DeliveryStatus.FAILED) return;
+
+  throw AppException.conflict(
+    ERROR_CODES.INVALID_STATUS_TRANSITION,
+    target === OrderStatus.DELIVERED
+      ? 'La remise est validée par le livreur depuis son application. Détachez le livreur si vous devez reprendre la main.'
+      : 'Le livreur pilote sa course depuis son application. Détachez-le si vous devez reprendre la main.',
+    { target },
+  );
 }
 
 /** Statuts qu'un rôle donné a le droit de demander. */

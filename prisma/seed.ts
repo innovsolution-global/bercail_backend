@@ -50,7 +50,13 @@ const prisma = new PrismaClient();
 
 const PASSWORDS = {
   superAdmin: process.env.SUPER_ADMIN_PASSWORD ?? 'SuperAdmin@2024',
-  admin: 'Admin@2024',
+  /**
+   * Gérant du premier établissement. Le seed ne crée que celui-là ; les
+   * établissements suivants sont ajoutés depuis le back-office, et leurs
+   * gérants aussi. `npm run admins:verify` contrôle que les accès notés
+   * dans `.env` fonctionnent encore, quel que soit leur origine.
+   */
+  admin: process.env.ADMIN_BRC_PASSWORD ?? 'Admin@2024',
   driver: 'Livreur@2024',
   customer: 'Client@2024',
 };
@@ -454,8 +460,8 @@ async function seedStaff(restaurantId: string) {
       restaurantId,
       firstName: 'Fatoumata',
       lastName: 'Sylla',
-      email: 'admin@lebercail.gn',
-      phone: '+224620000002',
+      email: process.env.ADMIN_BRC_EMAIL ?? 'admin@lebercail.gn',
+      phone: process.env.ADMIN_BRC_PHONE ?? '+224620000002',
       passwordHash: hash(PASSWORDS.admin),
       role: Role.ADMIN,
       status: AccountStatus.ACTIVE,

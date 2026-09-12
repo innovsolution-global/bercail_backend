@@ -73,9 +73,33 @@ export class NotificationsService {
    * Chaque ADMIN et SUPER_ADMIN actif reçoit sa propre ligne : le badge
    * « non lu » est personnel, il ne se partage pas.
    */
-  async notifyBackOffice(input: Omit<NotifyInput, 'userId'>): Promise<void> {
+  /**
+   * Alerte l'exploitation.
+   *
+   * @param restaurantId L'établissement concerné. **Le préciser cloisonne
+   *   l'alerte** : seuls ses gérants la reçoivent, plus le propriétaire
+   *   qui suit toute l'enseigne. Sans lui, tout le monde est prévenu —
+   *   ce qui ne convient qu'aux événements de l'enseigne entière.
+   *
+   *   C'était le comportement de toutes les alertes : chaque commande
+   *   sonnait à **toutes** les adresses, et n'importe quel gérant pouvait
+   *   prendre en main la commande d'une autre maison. Deux cuisines
+   *   pouvaient préparer le même plat.
+   */
+  async notifyBackOffice(
+    input: Omit<NotifyInput, 'userId'>,
+    restaurantId?: string | null,
+  ): Promise<void> {
     const staff = await this.prisma.user.findMany({
-      where: { role: { in: [Role.ADMIN, Role.SUPER_ADMIN] }, status: 'ACTIVE', deletedAt: null },
+      where: {
+        role: { in: [Role.ADMIN, Role.SUPER_ADMIN] },
+        status: 'ACTIVE',
+        deletedAt: null,
+        // Le propriétaire voit tout ; un gérant, seulement chez lui.
+        ...(restaurantId
+          ? { OR: [{ role: Role.SUPER_ADMIN }, { restaurantId }] }
+          : {}),
+      },
       select: { id: true },
     });
 
@@ -102,8 +126,15 @@ export class NotificationsService {
       createdAt: new Date().toISOString(),
     };
 
-    this.realtime.notifyRole(Role.ADMIN, 'notification.created', payload);
+    // Le propriétaire par son rôle, les gérants par leur établissement :
+    // une alerte cloisonnée ne doit pas ressortir par la diffusion.
     this.realtime.notifyRole(Role.SUPER_ADMIN, 'notification.created', payload);
+
+    if (restaurantId) {
+      this.realtime.notifyRestaurant(restaurantId, 'notification.created', payload);
+    } else {
+      this.realtime.notifyRole(Role.ADMIN, 'notification.created', payload);
+    }
 
     if (input.push !== false) {
       await this.push.sendToUsers(

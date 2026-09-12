@@ -44,14 +44,15 @@ export class CategoriesController {
   })
   list(@Query() query: CategoryQueryDto, @CurrentUser() user?: AuthenticatedUser) {
     const isBackOffice = user?.role === Role.ADMIN || user?.role === Role.SUPER_ADMIN;
-    return this.categories.list(Boolean(query.includeInactive) && isBackOffice);
+    return this.categories.list(Boolean(query.includeInactive) && isBackOffice, !isBackOffice);
   }
 
   @Get(':id')
   @OptionalAuth()
   @ApiEndpoint({ summary: 'Détail d’une catégorie (id ou slug)', public: true })
-  findOne(@Param('id') id: string) {
-    return this.categories.findOne(id);
+  findOne(@Param('id') id: string, @CurrentUser() user?: AuthenticatedUser) {
+    const isBackOffice = user?.role === Role.ADMIN || user?.role === Role.SUPER_ADMIN;
+    return this.categories.findOne(id, !isBackOffice);
   }
 
   @Post()

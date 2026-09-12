@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  DeliveryStatus,
   NotificationType,
   OrderChannel,
   OrderStatus,
@@ -18,6 +19,8 @@ import type { AuthenticatedUser, RequestContext } from '../common/types/authenti
 import { formatAmount } from '../common/utils/money.util';
 import { generateOrderReference, generateTransactionRef } from '../common/utils/reference.util';
 import { parseEnum, toWire } from '../common/utils/wire-enum.util';
+import { RestaurantRouter } from '../common/context/restaurant-router.service';
+import { isValidCoordinates } from '../common/utils/geo.util';
 import { PrismaService } from '../database/prisma.service';
 import { RecipesService } from '../finance/recipes.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -41,6 +44,7 @@ import {
 import {
   CUSTOMER_CANCELLABLE,
   TRANSITION_PERMISSION,
+  assertNotDriverOwned,
   assertTransition,
   statusLabel,
 } from './order-status';
@@ -68,6 +72,7 @@ export class OrdersService {
     private readonly idempotency: IdempotencyService,
     private readonly recipes: RecipesService,
     private readonly config: ConfigService,
+    private readonly router: RestaurantRouter,
   ) {}
 
   // ─────────────────────────────── Devis ──────────────────────────────────
@@ -144,22 +149,7 @@ export class OrdersService {
     context: RequestContext,
     options: { fromCart: boolean; loadCartLines?: () => Promise<LineInput[]> },
   ) {
-    const restaurant = await this.settings.assertOpenForOrders();
     const orderType = (parseEnum(OrderType, dto.type) ?? OrderType.DELIVERY) as OrderType;
-
-    if (orderType === OrderType.DELIVERY && !restaurant.deliveryEnabled) {
-      throw AppException.conflict(
-        ERROR_CODES.DELIVERY_DISABLED,
-        "La livraison est momentanément suspendue. Choisissez le retrait sur place.",
-      );
-    }
-
-    if (orderType === OrderType.PICKUP && !restaurant.pickupEnabled) {
-      throw AppException.conflict(
-        ERROR_CODES.PICKUP_DISABLED,
-        'Le retrait sur place est momentanément suspendu.',
-      );
-    }
 
     const lines = dto.items?.length
       ? dto.items.map<LineInput>((item) => ({
@@ -172,6 +162,53 @@ export class OrdersService {
 
     if (lines.length === 0) {
       throw AppException.badRequest(ERROR_CODES.CART_EMPTY, 'Votre panier est vide.');
+    }
+
+    /*
+     * **Quelle cuisine prépare cette commande.**
+     *
+     * Celle dont viennent les plats, et aucune autre : un plat appartient
+     * à une carte, une carte à un établissement. Le client a vu ces
+     * prix-là, sur cette carte-là ; c'est cette maison qui doit cuisiner,
+     * encaisser et livrer.
+     *
+     * Jusqu'ici, toute commande était rattachée au **plus ancien**
+     * établissement, quelle que soit la position du client, et l'alerte
+     * partait à tous les gérants de l'enseigne : deux cuisines pouvaient
+     * préparer le même plat, et deux livreurs partir pour la même porte.
+     *
+     * Un panier qui mélange deux maisons est refusé plutôt que réparti :
+     * cela n'arrive que si la carte a changé sous les pieds du client —
+     * il a déménagé, ou enregistré une adresse plus proche d'une autre
+     * maison — et il faut alors qu'il le sache, pas qu'on choisisse à sa
+     * place laquelle des deux servira.
+     */
+    const maisons = await this.router.forMenuItems(
+      lines.map((line) => line.menuItemId),
+    );
+
+    if (maisons.length > 1) {
+      throw AppException.badRequest(
+        ERROR_CODES.VALIDATION_ERROR,
+        'Votre panier contient des plats de deux établissements différents. ' +
+          'Videz-le et recommencez pour commander dans un seul.',
+      );
+    }
+
+    const restaurant = await this.settings.assertOpenForOrders(maisons[0] ?? null);
+
+    if (orderType === OrderType.DELIVERY && !restaurant.deliveryEnabled) {
+      throw AppException.conflict(
+        ERROR_CODES.DELIVERY_DISABLED,
+        'La livraison est momentanément suspendue. Choisissez le retrait sur place.',
+      );
+    }
+
+    if (orderType === OrderType.PICKUP && !restaurant.pickupEnabled) {
+      throw AppException.conflict(
+        ERROR_CODES.PICKUP_DISABLED,
+        'Le retrait sur place est momentanément suspendu.',
+      );
     }
 
     // Adresse : vérifiée comme appartenant au client, puis figée dans la
@@ -192,6 +229,38 @@ export class OrdersService {
           ERROR_CODES.ADDRESS_REQUIRED,
           'Adresse de livraison introuvable.',
         );
+      }
+
+      /*
+       * **La maison la plus proche de l'adresse livrée est la seule à
+       * pouvoir la servir.** C'est la règle de l'enseigne.
+       *
+       * Le panier désigne sa cuisine ; l'adresse, elle, désigne la
+       * maison qui devrait livrer. Quand les deux divergent — un client
+       * dont la carte est celle de Kaloum se fait livrer à deux pas de
+       * Kipé — on n'envoie pas un livreur traverser la ville : on le
+       * dit, avec les noms, et on laisse le client choisir entre changer
+       * d'adresse et refaire son panier chez l'autre maison.
+       *
+       * Une adresse sans coordonnées ne peut pas trancher : elle est
+       * livrée par la cuisine du panier. Les nouvelles adresses en ont
+       * toutes ; les anciennes finiront par être corrigées.
+       */
+      if (isValidCoordinates({ latitude: address.latitude ?? undefined, longitude: address.longitude ?? undefined })) {
+        const plusProche = await this.router.nearestTo({
+          latitude: address.latitude as number,
+          longitude: address.longitude as number,
+        });
+
+        if (plusProche && plusProche !== restaurant.id) {
+          const autre = await this.settings.byId(plusProche);
+          throw AppException.conflict(
+            ERROR_CODES.CONFLICT,
+            `Cette adresse est servie par « ${autre.name} », et votre panier vient de ` +
+              `« ${restaurant.name} ». Choisissez une adresse plus proche de ` +
+              `« ${restaurant.name} », ou videz le panier pour commander chez « ${autre.name} ».`,
+          );
+        }
       }
     }
 
@@ -345,22 +414,51 @@ export class OrdersService {
 
     const summary = toOrderSummary(created);
 
-    // Hors transaction : une notification lente ne doit pas tenir un verrou.
-    this.realtime.orderCreated({ ...summary, customerId: created.customerId });
+    /*
+     * La cuisine n'apprend l'existence d'une commande réglée en ligne
+     * qu'une fois l'encaissement confirmé.
+     *
+     * L'annoncer dès la création reviendrait à faire engager des denrées
+     * sur une commande qui peut n'être jamais payée : le client ouvre la
+     * page de l'opérateur, se ravise, ferme son navigateur — et le
+     * restaurant a déjà commencé. C'est `PaymentsService.confirm` qui
+     * lance l'annonce, au moment où l'argent est là.
+     *
+     * Le paiement à la livraison, lui, n'attend rien : il n'y a pas
+     * d'encaissement préalable à espérer, et retenir la commande
+     * empêcherait simplement de la préparer.
+     */
+    const attendPaiement = created.paymentMethod !== PaymentMethod.CASH_ON_DELIVERY;
 
-    await this.notifications.notifyBackOffice({
-      type: NotificationType.ORDER_CREATED,
-      title: 'Nouvelle commande',
-      body: `${summary.customerName} — ${formatAmount(created.total)} (${created.reference})`,
-      link: `/orders/${created.id}`,
-      entityId: created.id,
-    });
+    if (!attendPaiement) {
+      // Hors transaction : une notification lente ne doit pas tenir un verrou.
+      this.realtime.orderCreated({
+        ...summary,
+        customerId: created.customerId,
+        restaurantId: created.restaurantId,
+      });
+
+      await this.notifications.notifyBackOffice(
+        {
+          type: NotificationType.ORDER_CREATED,
+          title: 'Nouvelle commande',
+          body: `${summary.customerName} — ${formatAmount(created.total)} (${created.reference})`,
+          link: `/orders/${created.id}`,
+          entityId: created.id,
+        },
+        // La cuisine qui prépare, et le propriétaire. Pas les autres
+        // adresses : elles n'ont rien à faire de cette commande.
+        created.restaurantId,
+      );
+    }
 
     await this.notifications.notify({
       userId: user.id,
       type: NotificationType.ORDER_CREATED,
-      title: 'Commande enregistrée',
-      body: `Votre commande ${created.reference} a bien été reçue.`,
+      title: attendPaiement ? 'Commande en attente de paiement' : 'Commande enregistrée',
+      body: attendPaiement
+        ? `Votre commande ${created.reference} sera transmise à la cuisine dès le paiement.`
+        : `Votre commande ${created.reference} a bien été reçue.`,
       entityId: created.id,
     });
 
@@ -543,6 +641,8 @@ export class OrdersService {
     if (!order) throw AppException.notFound('Commande introuvable.');
 
     assertTransition(order.status, target, order.type);
+    // Une fois la course confiée, la suite se joue sur le terrain.
+    assertNotDriverOwned(target, order.delivery);
     this.assertTransitionPermission(user, target);
 
     const updated = await this.prisma.transaction(async (tx) => {
@@ -564,6 +664,8 @@ export class OrdersService {
       if (target === OrderStatus.DELIVERED) {
         await this.settleOnDelivery(tx, result.id, result.customerId, result.total, order.paymentMethod);
       }
+
+      await this.closeDeliveryWith(tx, id, target, dto.comment);
 
       return result;
     });
@@ -722,6 +824,156 @@ export class OrdersService {
    * Effets d'une livraison confirmée : chiffre d'affaires du client,
    * fidélité, encaissement du paiement à la livraison.
    */
+  /**
+   * Annule les commandes en ligne dont le paiement n'est jamais venu.
+   *
+   * Une commande réglée en ligne attend son paiement avant d'être
+   * transmise à la cuisine. Quand le client ferme la page de l'opérateur
+   * sans payer — ou perd le réseau, ou change d'avis — elle restait
+   * **en attente pour toujours** : dans sa liste de commandes en cours,
+   * dans celle du restaurant, avec un panier figé et un coupon consommé.
+   * Rien ne la fermait jamais.
+   *
+   * Passé le délai, elle est annulée comme le ferait le client, avec les
+   * mêmes restitutions — coupon rendu, compteurs corrigés, paiement
+   * marqué échoué — et le client en est prévenu : sa commande n'a pas
+   * disparu, elle a expiré, et il peut la recommander.
+   *
+   * @returns Le nombre de commandes expirées.
+   */
+  async expireUnpaid(delayMinutes: number): Promise<number> {
+    const limite = new Date(Date.now() - delayMinutes * 60_000);
+
+    const perimees = await this.prisma.order.findMany({
+      where: {
+        deletedAt: null,
+        status: OrderStatus.PENDING,
+        paymentMethod: { not: PaymentMethod.CASH_ON_DELIVERY },
+        paymentStatus: { not: PaymentStatus.PAID },
+        createdAt: { lt: limite },
+      },
+      select: { id: true, customerId: true, promotionId: true, reference: true, restaurantId: true },
+    });
+
+    for (const commande of perimees) {
+      const motif = `Paiement non reçu sous ${delayMinutes} minutes`;
+
+      const updated = await this.prisma.transaction(async (tx) => {
+        const result = await tx.order.update({
+          where: { id: commande.id },
+          data: {
+            status: OrderStatus.CANCELLED,
+            cancelledAt: new Date(),
+            cancellationReason: motif,
+          },
+          include: ORDER_DETAIL_INCLUDE,
+        });
+
+        await tx.orderStatusHistory.create({
+          data: { orderId: commande.id, status: OrderStatus.CANCELLED, comment: motif },
+        });
+
+        if (commande.promotionId) {
+          await tx.promotion.update({
+            where: { id: commande.promotionId },
+            data: { usageCount: { decrement: 1 } },
+          });
+          await tx.couponUsage.deleteMany({ where: { orderId: commande.id } });
+        }
+
+        if (commande.customerId) {
+          await tx.customerProfile.updateMany({
+            where: { userId: commande.customerId },
+            data: { cancelledOrders: { increment: 1 }, ordersCount: { decrement: 1 } },
+          });
+        }
+
+        await tx.payment.updateMany({
+          where: { orderId: commande.id, status: PaymentStatus.PENDING },
+          data: { status: PaymentStatus.FAILED, failureReason: motif },
+        });
+
+        return result;
+      });
+
+      this.realtime.orderUpdated({
+        ...toOrderSummary(updated),
+        customerId: updated.customerId,
+        restaurantId: updated.restaurantId,
+        status: toWire(OrderStatus.CANCELLED),
+      });
+
+      if (commande.customerId) {
+        await this.notifications.notify({
+          userId: commande.customerId,
+          type: NotificationType.ORDER_CANCELLED,
+          title: 'Commande expirée',
+          body:
+            `Le paiement de la commande ${commande.reference} n’est pas arrivé : ` +
+            'elle a été annulée. Vous pouvez la recommander à tout moment.',
+          entityId: commande.id,
+        });
+      }
+    }
+
+    return perimees.length;
+  }
+
+  /**
+   * Ferme la course d'une commande qui vient de se terminer.
+   *
+   * Une commande a deux vies parallèles : la sienne, et celle de sa
+   * course. Elles étaient tenues séparément, et pouvaient diverger :
+   * une commande marquée « livrée » depuis le back-office laissait sa
+   * course « sur place » — le livreur voyait encore un bouton « Confirmer
+   * la remise » sur une commande que le client, lui, voyait livrée
+   * depuis la veille. Quel que soit le chemin qui termine la commande,
+   * sa course se termine avec elle, et le livreur est libéré.
+   */
+  private async closeDeliveryWith(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+    target: OrderStatus,
+    comment?: string | null,
+  ): Promise<void> {
+    if (target !== OrderStatus.DELIVERED && target !== OrderStatus.CANCELLED) return;
+
+    const delivery = await tx.delivery.findUnique({
+      where: { orderId },
+      select: { id: true, status: true, driverId: true },
+    });
+    if (!delivery) return;
+    if (delivery.status === DeliveryStatus.DELIVERED || delivery.status === DeliveryStatus.FAILED) {
+      return;
+    }
+
+    const now = new Date();
+    const livree = target === OrderStatus.DELIVERED;
+
+    await tx.delivery.update({
+      where: { id: delivery.id },
+      data: livree
+        ? { status: DeliveryStatus.DELIVERED, deliveredAt: now }
+        : { status: DeliveryStatus.FAILED, failedAt: now, failureReason: comment ?? 'Commande annulée' },
+    });
+
+    await tx.deliveryEvent.create({
+      data: {
+        deliveryId: delivery.id,
+        status: livree ? DeliveryStatus.DELIVERED : DeliveryStatus.FAILED,
+        comment: livree ? 'Commande marquée livrée' : (comment ?? 'Commande annulée'),
+      },
+    });
+
+    // Le livreur redevient disponible : sa course n'existe plus.
+    if (delivery.driverId) {
+      await tx.driverProfile.update({
+        where: { id: delivery.driverId },
+        data: { isAvailable: true },
+      });
+    }
+  }
+
   private async settleOnDelivery(
     tx: Prisma.TransactionClient,
     orderId: string,

@@ -24,7 +24,6 @@ import {
   deliveryStatusLabel,
   timestampField,
 } from './delivery-status';
-import { DeliveryVerificationService } from './delivery-verification.service';
 import { DriverAssignmentService } from './driver-assignment.service';
 import {
   DELIVERY_INCLUDE,
@@ -56,7 +55,6 @@ export class DeliveriesService {
     private readonly prisma: PrismaService,
     private readonly orders: OrdersService,
     private readonly assignment: DriverAssignmentService,
-    private readonly verification: DeliveryVerificationService,
     private readonly notifications: NotificationsService,
     private readonly realtime: RealtimeService,
     private readonly audit: AuditService,
@@ -86,10 +84,19 @@ export class DeliveriesService {
 
     if (!order) throw AppException.notFound('Commande introuvable.');
 
+    /*
+     * Une commande prise au restaurant n'a pas de course.
+     *
+     * Le message nomme la situation exacte : dire « à emporter » à
+     * quelqu'un qui regarde une commande consommée sur place le laisse
+     * douter de ce que le logiciel a compris.
+     */
     if (order.type !== OrderType.DELIVERY) {
       throw AppException.conflict(
         ERROR_CODES.INVALID_STATUS_TRANSITION,
-        "Cette commande est à emporter : elle n'a pas de livraison.",
+        order.type === OrderType.DINE_IN
+          ? "Cette commande est servie sur place : elle n'a pas de livraison."
+          : "Cette commande est à emporter : elle n'a pas de livraison.",
       );
     }
 
@@ -125,10 +132,19 @@ export class DeliveriesService {
       );
     }
 
-    const restaurant = await this.settings.getRestaurantCached();
+    // La cuisine de **cette** commande, pas celle du contexte : le
+    // propriétaire attribue depuis sa vue d'ensemble, où le contexte
+    // désigne la maison la plus ancienne. Mesurer la distance et l'heure
+    // d'arrivée depuis Kaloum pour un sac qui part de Kipé faussait
+    // les deux.
+    const restaurant = await this.settings.byId(order.restaurantId);
 
-    const { delivery, code, previousDriverId } = await this.prisma.transaction(async (tx) => {
-      const driver = await this.assignment.assertAssignable(driverId, tx);
+    const { delivery, previousDriverId } = await this.prisma.transaction(async (tx) => {
+      const driver = await this.assignment.assertAssignable(
+        driverId,
+        tx,
+        order.restaurantId,
+      );
 
       const snapshot = order.addressSnapshot as Prisma.JsonObject | null;
       const target = isValidCoordinates({
@@ -207,9 +223,8 @@ export class DeliveriesService {
       }
 
       // Code de remise : généré à l'attribution, communiqué au client.
-      const generated = await this.verification.issue(saved.id, tx);
 
-      return { delivery: saved, code: generated, previousDriverId: previous };
+      return { delivery: saved, previousDriverId: previous };
     });
 
     const full = await this.findRaw(delivery.id);
@@ -235,15 +250,14 @@ export class DeliveriesService {
       });
     }
 
-    // Le code n'existe en clair qu'ici : il part directement au client.
     if (order.customerId) {
       await this.notifications.notify({
         userId: order.customerId,
         type: NotificationType.DRIVER_ASSIGNED,
         title: 'Un livreur prend en charge votre commande',
-        body: `Votre code de confirmation est ${code}. Communiquez-le au livreur à la remise.`,
+        body: `Votre commande ${order.reference} est confiée à un livreur.`,
         entityId: order.id,
-        data: { deliveryId: delivery.id, code },
+        data: { deliveryId: delivery.id },
       });
     }
 
@@ -350,7 +364,13 @@ export class DeliveriesService {
     const where: Prisma.DeliveryWhereInput = {
       driverId: driverProfileId,
       ...(query.scope === 'active'
-        ? { status: { in: DELIVERY_ACTIVE } }
+        ? {
+            status: { in: DELIVERY_ACTIVE },
+            // Ceinture et bretelles : une course dont la commande est
+            // déjà livrée ou annulée n'a plus rien à faire dans la
+            // liste du livreur, même si elle n'a pas été refermée.
+            order: { status: { notIn: [OrderStatus.DELIVERED, OrderStatus.CANCELLED] } },
+          }
         : query.scope === 'history'
           ? { status: { in: [DeliveryStatus.DELIVERED, DeliveryStatus.FAILED] } }
           : {}),
@@ -451,16 +471,23 @@ export class DeliveriesService {
       );
     }
 
-    // Le code est vérifié AVANT toute écriture : une tentative ratée ne
-    // doit rien changer à l'état de la course.
-    await this.verification.verify(deliveryId, dto.code);
-
+    /*
+     * **Un geste, pas un code.**
+     *
+     * La remise exigeait un code de quatre chiffres, généré à
+     * l'attribution, notifié au client, dicté au livreur, vérifié ici —
+     * avec expiration, compteur d'essais et régénération. Le
+     * propriétaire a tranché le 11 septembre 2026 : le client commande,
+     * le livreur livre, et s'il y a des espèces à encaisser il les
+     * encaisse. Le livreur marque la course livrée, un point c'est tout.
+     * La preuve, c'est la trace : qui a validé, quand, et où.
+     */
     if (delivery.status !== DeliveryStatus.ARRIVED_AT_CUSTOMER) {
-      // Le livreur a saisi le code sans déclarer son arrivée : on
+      // Le livreur valide sans avoir déclaré son arrivée : on
       // l'enregistre plutôt que de lui refuser la remise.
       assertDeliveryTransition(delivery.status, DeliveryStatus.ARRIVED_AT_CUSTOMER);
       await this.applyTransition(delivery, DeliveryStatus.ARRIVED_AT_CUSTOMER, user, context, {
-        comment: 'Arrivée déclarée à la saisie du code',
+        comment: 'Arrivée déclarée à la remise',
         latitude: dto.latitude,
         longitude: dto.longitude,
       });
@@ -468,7 +495,7 @@ export class DeliveriesService {
 
     const fresh = await this.findRaw(deliveryId);
     const updated = await this.applyTransition(fresh, DeliveryStatus.DELIVERED, user, context, {
-      comment: 'Remise confirmée par code',
+      comment: 'Remise validée par le livreur',
       latitude: dto.latitude,
       longitude: dto.longitude,
     });
@@ -554,13 +581,16 @@ export class DeliveriesService {
       }
     });
 
-    await this.notifications.notifyBackOffice({
-      type: NotificationType.ADMIN_ALERT,
-      title: 'Course refusée',
-      body: `${user.firstName} ${user.lastName} a refusé la commande ${delivery.order?.reference ?? ''} : ${reason}`,
-      entityId: delivery.orderId,
-      link: `/orders/${delivery.orderId}`,
-    });
+    await this.notifications.notifyBackOffice(
+      {
+        type: NotificationType.ADMIN_ALERT,
+        title: 'Course refusée',
+        body: `${user.firstName} ${user.lastName} a refusé la commande ${delivery.order?.reference ?? ''} : ${reason}`,
+        entityId: delivery.orderId,
+        link: `/orders/${delivery.orderId}`,
+      },
+      delivery.order?.restaurantId,
+    );
 
     await this.audit.record({
       actor: user,
@@ -600,13 +630,16 @@ export class DeliveriesService {
       comment: reason,
     });
 
-    await this.notifications.notifyBackOffice({
-      type: NotificationType.ADMIN_ALERT,
-      title: 'Livraison en échec',
-      body: `Commande ${delivery.order?.reference ?? ''} : ${reason}`,
-      entityId: delivery.orderId,
-      link: `/orders/${delivery.orderId}`,
-    });
+    await this.notifications.notifyBackOffice(
+      {
+        type: NotificationType.ADMIN_ALERT,
+        title: 'Livraison en échec',
+        body: `Commande ${delivery.order?.reference ?? ''} : ${reason}`,
+        entityId: delivery.orderId,
+        link: `/orders/${delivery.orderId}`,
+      },
+      delivery.order?.restaurantId,
+    );
 
     await this.audit.record({
       actor: user,
@@ -740,7 +773,7 @@ export class DeliveriesService {
         OrderStatus.DELIVERED,
         actor,
         context,
-        'Remise confirmée par code',
+        'Remise validée par le livreur',
       );
     }
 
@@ -752,6 +785,7 @@ export class DeliveriesService {
       status: toWire(target),
       customerId: customerId ?? null,
       driverProfileId: delivery.driverId,
+      restaurantId: delivery.order?.restaurantId ?? null,
     });
 
     if (customerId) {
@@ -764,7 +798,7 @@ export class DeliveriesService {
         [DeliveryStatus.ARRIVED_AT_CUSTOMER]: {
           type: NotificationType.DELIVERY_ARRIVED,
           title: 'Le livreur est arrivé',
-          body: 'Munissez-vous de votre code de confirmation.',
+          body: 'Il est devant chez vous.',
         },
         [DeliveryStatus.FAILED]: {
           type: NotificationType.ADMIN_ALERT,
@@ -867,6 +901,7 @@ export class DeliveriesService {
     this.realtime.driverLocationUpdated({
       driverProfileId,
       orderId,
+      restaurantId: user.restaurantId ?? null,
       latitude: dto.latitude,
       longitude: dto.longitude,
       heading: dto.heading ?? null,
@@ -940,56 +975,5 @@ export class DeliveriesService {
       speed: point.speed,
       at: point.recordedAt.toISOString(),
     }));
-  }
-
-  /** Code de confirmation côté client (statut, jamais le code lui-même). */
-  async verificationStatus(user: AuthenticatedUser, deliveryId: string) {
-    const delivery = await this.findRaw(deliveryId);
-    this.assertCanRead(user, delivery);
-    return this.verification.statusFor(deliveryId);
-  }
-
-  /** Régénère un code — utile si le client n'a pas reçu la notification. */
-  async regenerateCode(user: AuthenticatedUser, deliveryId: string, context: RequestContext) {
-    const delivery = await this.findRaw(deliveryId);
-
-    const isCustomer = user.role === Role.CUSTOMER && delivery.order?.customerId === user.id;
-    const isBackOffice = user.role === Role.ADMIN || user.role === Role.SUPER_ADMIN;
-
-    if (!isCustomer && !isBackOffice) {
-      throw AppException.forbidden(ERROR_CODES.FORBIDDEN, "Vous n'avez pas accès à cette livraison.");
-    }
-
-    if (delivery.status === DeliveryStatus.DELIVERED) {
-      throw AppException.conflict(
-        ERROR_CODES.INVALID_DELIVERY_TRANSITION,
-        'Cette livraison est déjà terminée.',
-      );
-    }
-
-    const code = await this.verification.issue(deliveryId);
-    const customerId = delivery.order?.customerId;
-
-    if (customerId) {
-      await this.notifications.notify({
-        userId: customerId,
-        type: NotificationType.DRIVER_ASSIGNED,
-        title: 'Nouveau code de confirmation',
-        body: `Votre code est ${code}.`,
-        entityId: delivery.orderId,
-        data: { deliveryId, code },
-      });
-    }
-
-    await this.audit.record({
-      actor: user,
-      action: 'DELIVERY_CODE_REGENERATED',
-      module: 'deliveries',
-      entityType: 'Delivery',
-      entityId: deliveryId,
-      context,
-    });
-
-    return { success: true };
   }
 }

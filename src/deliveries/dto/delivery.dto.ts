@@ -10,7 +10,6 @@ import {
   IsOptional,
   IsString,
   IsUUID,
-  Matches,
   Max,
   MaxLength,
   Min,
@@ -89,13 +88,13 @@ export class FailDeliveryDto {
   reason!: string;
 }
 
-/** Confirmation de remise : le livreur saisit le code du client. */
+/**
+ * Validation de la remise : le livreur marque la course livrée.
+ *
+ * Sans code : le propriétaire veut un geste simple. Seule la position au
+ * moment de la remise est acceptée, pour la trace.
+ */
 export class CompleteDeliveryDto {
-  @ApiProperty({ example: '4271', description: 'Code de confirmation remis au client.' })
-  @IsString()
-  @Matches(/^[0-9]{3,8}$/, { message: 'code doit être numérique.' })
-  code!: string;
-
   @ApiPropertyOptional({ description: 'Position au moment de la remise.' })
   @IsOptional()
   @Type(() => Number)
