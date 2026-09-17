@@ -54,16 +54,6 @@ export class DriversController {
     return this.assignment.assignable({ orderId: query.orderId, zone: query.zone });
   }
 
-  @Get('zones')
-  @RequirePermissions('DRIVERS_READ')
-  @ApiEndpoint({
-    summary: 'Zones de livraison couvertes',
-    roles: [Role.ADMIN, Role.SUPER_ADMIN],
-    permissions: ['DRIVERS_READ'],
-  })
-  zones() {
-    return this.drivers.zones();
-  }
 
   @Post()
   @RequirePermissions('DRIVERS_CREATE')

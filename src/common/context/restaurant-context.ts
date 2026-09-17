@@ -31,6 +31,18 @@ export interface RestaurantScope {
   customerId?: string | null;
 
   /**
+   * L'endroit que l'application désigne pour cette requête.
+   *
+   * L'adresse que le client a **choisie** à l'écran, ou sa position GPS
+   * s'il n'en a pas encore. Elle prime sur l'adresse par défaut : le
+   * serveur ne voit que le carnet, l'application voit ce que le client
+   * regarde. Sans elle, un client qui choisit son adresse de Kipé lit
+   * « Kipé » à l'écran et reçoit pourtant la carte de Kaloum — puis se
+   * fait refuser à la commande, sans comprendre.
+   */
+  position?: { latitude: number; longitude: number } | null;
+
+  /**
    * Mémo de la maison qui sert ce client, le temps de la requête.
    *
    * Une promesse, et non un identifiant : plusieurs lectures publiques

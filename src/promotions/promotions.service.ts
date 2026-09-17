@@ -55,10 +55,7 @@ export class PromotionsService {
     const now = new Date();
     const promotions = await this.prisma.promotion.findMany({
       where: {
-        // La bande d'offres de l'accueil accompagne une carte : elle
-        // annonce celles de la maison dont on lit les plats, pas celles
-        // d'à côté, qu'on ne pourrait pas utiliser.
-        restaurantId: await this.scope.publicRestaurantId(),
+        // Les promotions sont communes à toutes les maisons, comme la carte.
         deletedAt: null,
         isActive: true,
         startsAt: { lte: now },
@@ -126,7 +123,6 @@ export class PromotionsService {
 
     const promotion = await this.prisma.promotion.create({
       data: {
-        restaurantId: this.scope.resolve(dto.restaurantId),
         name: dto.name,
         description: dto.description,
         imageUrl: dto.imageUrl || null,
@@ -273,20 +269,14 @@ export class PromotionsService {
 
   /** Vérification d'un code par le client, avant de valider son panier. */
   /**
-   * @param publicOnly Vérification faite pour un client : elle est alors
-   *   ramenée à l'établissement qu'il consulte. Un compte du back-office
-   *   garde sa propre portée — le propriétaire doit pouvoir contrôler un
-   *   code de n'importe laquelle de ses maisons.
+   * @param _publicOnly Conservé pour les appelants ; un code vaut dans
+   *   toutes les maisons depuis que les promotions sont communes.
    */
-  async check(code: string, publicOnly = false) {
+  async check(code: string, _publicOnly = false) {
     const promotion = await this.prisma.promotion.findFirst({
       where: {
         code: code.trim().toUpperCase(),
         deletedAt: null,
-        // Le refus est le même que pour un code inexistant : dire « ce
-        // code appartient à une autre adresse » révélerait l'offre d'une
-        // maison à la clientèle d'une autre.
-        ...(publicOnly ? { restaurantId: await this.scope.publicRestaurantId() } : {}),
       },
     });
 

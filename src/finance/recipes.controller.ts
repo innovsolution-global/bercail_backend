@@ -35,13 +35,13 @@ export class RecipesController {
   }
 
   @Put()
-  @RequirePermissions('MENU_UPDATE')
+  @RequirePermissions('STOCK_MANAGE')
   @ApiEndpoint({
     summary: 'Enregistrer la fiche technique',
     description:
       'Remplace la fiche entière. Une liste vide efface la fiche : le plat cesse alors de mouvementer le stock à la préparation.',
     roles: [...BACK_OFFICE],
-    permissions: ['MENU_UPDATE'],
+    permissions: ['STOCK_MANAGE'],
   })
   save(
     @Param('menuItemId') menuItemId: string,

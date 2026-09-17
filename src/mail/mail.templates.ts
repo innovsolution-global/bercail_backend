@@ -189,3 +189,64 @@ export function accountCreatedWithActivationLink(input: {
     html,
   };
 }
+
+/**
+ * Mot de passe oublié : le code à six chiffres, et le lien.
+ *
+ * Le même message sert aux deux applications. Le client, dans l'application
+ * mobile, tape le code ; un gérant, au back-office, ouvre le lien. L'un et
+ * l'autre ne servent qu'une fois et expirent ensemble.
+ */
+export function passwordResetCode(input: {
+  to: string;
+  firstName: string;
+  code: string;
+  resetUrl: string;
+  expiresInMinutes: number;
+}): MailMessage {
+  // « 482 113 » se lit et se recopie mieux que « 482113 ».
+  const codeLisible = `${input.code.slice(0, 3)} ${input.code.slice(3)}`;
+
+  const text = [
+    `Bonjour ${input.firstName},`,
+    '',
+    'Vous avez demandé un nouveau mot de passe pour Les Saveurs du Bercail.',
+    '',
+    `Votre code, à saisir dans l'application : ${codeLisible}`,
+    '',
+    'Depuis un ordinateur, vous pouvez aussi ouvrir ce lien :',
+    input.resetUrl,
+    '',
+    `Le code et le lien expirent dans ${input.expiresInMinutes} minutes et ne servent qu'une fois.`,
+    "Si vous n'êtes pas à l'origine de cette demande, ignorez ce message : votre mot de passe reste inchangé.",
+  ].join('\n');
+
+  const html = layout(
+    'Votre code de réinitialisation',
+    `<p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:${MUTED}">
+       Bonjour ${input.firstName}, vous avez demandé un nouveau mot de passe.
+       Saisissez ce code dans l'application&nbsp;:
+     </p>
+     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#FAF6F0;border-radius:10px">
+       <tr><td align="center" style="padding:18px 16px;font-size:34px;font-weight:700;letter-spacing:8px;color:${INK}">
+         ${codeLisible}
+       </td></tr>
+     </table>
+     <p style="margin:18px 0 0;font-size:12px;line-height:1.6;color:${MUTED}">
+       Le code expire dans ${input.expiresInMinutes} minutes et ne sert qu'une fois.
+       Si vous n'êtes pas à l'origine de cette demande, ignorez ce message&nbsp;: votre
+       mot de passe reste inchangé.
+     </p>
+     <p style="margin:12px 0 0;font-size:11px;line-height:1.5;color:${MUTED};word-break:break-all">
+       Depuis un ordinateur, vous pouvez aussi ouvrir cette adresse&nbsp;:<br />
+       <span style="color:${INK}">${input.resetUrl}</span>
+     </p>`,
+  );
+
+  return {
+    to: input.to,
+    subject: 'Votre code de réinitialisation — Les Saveurs du Bercail',
+    text,
+    html,
+  };
+}

@@ -204,11 +204,11 @@ async function main(): Promise<void> {
   await seedPermissions();
 
   const restaurant = await seedRestaurant();
-  const { categories, menuItems } = await seedMenu(restaurant.id);
+  const { categories, menuItems } = await seedMenu();
   const { superAdmin, admins } = await seedStaff(restaurant.id);
   const drivers = await seedDrivers(superAdmin.id, restaurant.id);
   const customers = await seedCustomers();
-  const promotions = await seedPromotions(restaurant.id);
+  const promotions = await seedPromotions();
 
   await seedOrders({ restaurant, menuItems, customers, drivers, admins, promotions });
   await seedPosOrders({ restaurant, menuItems, cashierId: admins[0]?.id ?? superAdmin.id });
@@ -253,6 +253,7 @@ async function truncate(): Promise<void> {
     prisma.address.deleteMany(),
     prisma.menuOption.deleteMany(),
     prisma.menuOptionGroup.deleteMany(),
+    prisma.menuItemStockout.deleteMany(),
     prisma.menuItem.deleteMany(),
     prisma.category.deleteMany(),
     prisma.promotion.deleteMany(),
@@ -343,12 +344,11 @@ async function seedRestaurant() {
   return restaurant;
 }
 
-async function seedMenu(restaurantId: string) {
+async function seedMenu() {
   const categories = await Promise.all(
     CATEGORIES.map((category, index) =>
       prisma.category.create({
         data: {
-          restaurantId,
           name: category.name,
           slug: category.name
             .normalize('NFD')
@@ -374,7 +374,6 @@ async function seedMenu(restaurantId: string) {
 
     const created = await prisma.menuItem.create({
       data: {
-        restaurantId,
         categoryId: category.id,
         name: item.name,
         shortDescription: item.shortDescription,
@@ -500,10 +499,21 @@ async function seedStaff(restaurantId: string) {
     'REPORTS_READ',
   ]);
 
-  const overrides = (ROLE_PERMISSIONS.ADMIN ?? [])
+  const socle = new Set<string>(ROLE_PERMISSIONS.ADMIN ?? []);
+
+  // Retirés : ce que le socle donne et qui ne lui est pas accordé.
+  const retires = [...socle]
     .filter((code) => !allowedForAdmin2.has(code))
-    .map((code) => ({ userId: admin2.id, permissionId: idByCode.get(code)!, granted: false }))
-    .filter((entry) => Boolean(entry.permissionId));
+    .map((code) => ({ userId: admin2.id, permissionId: idByCode.get(code)!, granted: false }));
+
+  // Accordés : ce qui lui est donné hors du socle. L'écriture de la carte
+  // n'est plus dans le socle ADMIN depuis que la carte est commune ; sans
+  // cette ligne, ce compte « carte » perdrait justement la carte.
+  const accordes = [...allowedForAdmin2]
+    .filter((code) => !socle.has(code))
+    .map((code) => ({ userId: admin2.id, permissionId: idByCode.get(code)!, granted: true }));
+
+  const overrides = [...retires, ...accordes].filter((entry) => Boolean(entry.permissionId));
 
   await prisma.userPermission.createMany({ data: overrides });
 
@@ -605,13 +615,12 @@ async function seedCustomers() {
   return customers;
 }
 
-async function seedPromotions(restaurantId: string) {
+async function seedPromotions() {
   const now = new Date();
 
   const promotions = await Promise.all([
     prisma.promotion.create({
       data: {
-        restaurantId,
         name: 'Bienvenue au Bercail',
         description: '10 % sur votre première commande.',
         code: 'BIENVENUE10',
@@ -627,7 +636,6 @@ async function seedPromotions(restaurantId: string) {
     }),
     prisma.promotion.create({
       data: {
-        restaurantId,
         name: 'Livraison offerte',
         description: 'Frais de livraison offerts dès 200 000 GNF.',
         code: 'LIVRAISON0',
@@ -641,7 +649,6 @@ async function seedPromotions(restaurantId: string) {
     }),
     prisma.promotion.create({
       data: {
-        restaurantId,
         name: 'Vendredi grillades',
         description: '25 000 GNF de remise sur les grillades.',
         code: 'GRILL25',
@@ -656,7 +663,6 @@ async function seedPromotions(restaurantId: string) {
     }),
     prisma.promotion.create({
       data: {
-        restaurantId,
         name: 'Ramadan 2025',
         description: 'Promotion terminée — conservée pour l’historique.',
         code: 'RAMADAN15',

@@ -1,10 +1,16 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, Restaurant, Role } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import { RestaurantRouter } from '../common/context/restaurant-router.service';
 import { AppException, ERROR_CODES } from '../common/exceptions/app.exception';
 import type { AuthenticatedUser, RequestContext } from '../common/types/authenticated-user';
 import { PrismaService } from '../database/prisma.service';
 import type { CreateRestaurantDto, UpdateRestaurantDto } from './dto/restaurant.dto';
+
+/** Des zones saisies à la main : sans blanc, sans doublon, dans l'ordre donné. */
+function cleanZones(zones: readonly string[] | undefined): string[] {
+  return [...new Set((zones ?? []).map((zone) => zone.trim()).filter(Boolean))];
+}
 
 /**
  * Les établissements de l'enseigne.
@@ -19,6 +25,7 @@ export class RestaurantsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly router: RestaurantRouter,
   ) {}
 
   /**
@@ -51,11 +58,15 @@ export class RestaurantsService {
       where,
       orderBy: { name: 'asc' },
       include: {
-        _count: { select: { orders: true, staff: true, menuItems: true } },
+        _count: { select: { orders: true, staff: true } },
       },
     });
 
-    return restaurants.map((restaurant) => this.toDto(restaurant, restaurant._count));
+    // La carte est commune : chaque maison sert le même nombre de plats.
+    const plats = await this.prisma.menuItem.count({ where: { deletedAt: null } });
+    return restaurants.map((restaurant) =>
+      this.toDto(restaurant, { ...restaurant._count, menuItems: plats }),
+    );
   }
 
   async findOne(id: string, actor: AuthenticatedUser) {
@@ -71,12 +82,13 @@ export class RestaurantsService {
       where: { id, deletedAt: null },
       include: {
         openingHours: { orderBy: { weekday: 'asc' } },
-        _count: { select: { orders: true, staff: true, menuItems: true } },
+        _count: { select: { orders: true, staff: true } },
       },
     });
 
     if (!restaurant) throw AppException.notFound('Établissement introuvable.');
-    return this.toDto(restaurant, restaurant._count);
+    const plats = await this.prisma.menuItem.count({ where: { deletedAt: null } });
+    return this.toDto(restaurant, { ...restaurant._count, menuItems: plats });
   }
 
   /**
@@ -109,6 +121,7 @@ export class RestaurantsService {
         longitude: dto.longitude,
         deliveryFee: dto.deliveryFee ?? 15_000,
         minimumOrderAmount: dto.minimumOrder ?? 50_000,
+        deliveryZones: cleanZones(dto.deliveryZones),
         isOpen: dto.isOpen ?? true,
       },
     });
@@ -122,6 +135,10 @@ export class RestaurantsService {
       newValue: { code: restaurant.code, name: restaurant.name, city: restaurant.city },
       context,
     });
+
+    // La maison sert ses voisins tout de suite : le routage de proximité
+    // garde sa liste une minute, il ne doit pas l'ignorer jusque-là.
+    this.router.forget();
 
     return this.toDto(restaurant);
   }
@@ -137,12 +154,15 @@ export class RestaurantsService {
     const existing = await this.prisma.restaurant.findFirst({ where: { id, deletedAt: null } });
     if (!existing) throw AppException.notFound('Établissement introuvable.');
 
+    // `minimumOrder` n'est pas une colonne : étalé tel quel, Prisma le refusait.
+    const { code, minimumOrder, deliveryZones, ...rest } = dto;
     const restaurant = await this.prisma.restaurant.update({
       where: { id },
       data: {
-        ...dto,
-        ...(dto.code ? { code: dto.code.trim().toUpperCase() } : {}),
-        ...(dto.minimumOrder !== undefined ? { minimumOrderAmount: dto.minimumOrder } : {}),
+        ...rest,
+        ...(code ? { code: code.trim().toUpperCase() } : {}),
+        ...(minimumOrder !== undefined ? { minimumOrderAmount: minimumOrder } : {}),
+        ...(deliveryZones ? { deliveryZones: cleanZones(deliveryZones) } : {}),
       },
     });
 
@@ -156,6 +176,9 @@ export class RestaurantsService {
       newValue: { name: restaurant.name, isActive: restaurant.isActive },
       context,
     });
+
+    // Une position ou une activité changée change qui sert qui.
+    this.router.forget();
 
     return this.toDto(restaurant);
   }
@@ -198,6 +221,9 @@ export class RestaurantsService {
       context,
     });
 
+    // Une maison fermée ne doit plus recevoir la moindre commande.
+    this.router.forget();
+
     return { success: true };
   }
 
@@ -220,6 +246,9 @@ export class RestaurantsService {
       code: restaurant.code,
       name: restaurant.name,
       tagline: restaurant.tagline,
+      /** La photo de la maison, affichée dans la liste des établissements. */
+      logoUrl: restaurant.logoUrl,
+      coverImageUrl: restaurant.coverImageUrl,
       phone: restaurant.phone,
       email: restaurant.email,
       address: restaurant.address,
@@ -231,6 +260,7 @@ export class RestaurantsService {
       isActive: restaurant.isActive,
       deliveryFee: restaurant.deliveryFee,
       minimumOrder: restaurant.minimumOrderAmount,
+      deliveryZones: restaurant.deliveryZones,
       currency: restaurant.currency,
       ordersCount: counts?.orders ?? 0,
       staffCount: counts?.staff ?? 0,

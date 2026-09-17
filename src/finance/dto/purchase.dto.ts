@@ -53,11 +53,35 @@ export class PurchaseLineDto {
   @Min(0.001)
   quantity!: number;
 
-  @ApiProperty({ description: 'Prix unitaire en GNF.', example: 45000 })
+  /**
+   * Ce que la ligne a coûté, en GNF — le prix de gros, tel qu'il est
+   * payé. Le prix unitaire s'en déduit pour le coût moyen du stock.
+   * L'un des deux est requis.
+   */
+  @ApiPropertyOptional({ description: 'Prix total de la ligne en GNF.', example: 450000 })
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(0)
-  unitPrice!: number;
+  lineTotal?: number;
+
+  @ApiPropertyOptional({ description: 'Prix unitaire en GNF, si le total n’est pas donné.', example: 45000 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  unitPrice?: number;
+
+  /**
+   * Le seuil d'alerte de l'article, décidé au moment d'acheter : c'est là
+   * qu'on sait combien il en faut d'avance.
+   */
+  @ApiPropertyOptional({ description: 'Seuil d’alerte de l’article, mis à jour avec l’achat.' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  minQuantity?: number;
 }
 
 export class CreatePurchaseDto {

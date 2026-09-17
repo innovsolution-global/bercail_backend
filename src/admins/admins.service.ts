@@ -266,6 +266,28 @@ export class AdminsService {
   async update(id: string, dto: UpdateAdminDto, actor: AuthenticatedUser, context: RequestContext) {
     const target = await this.assertManageable(id, actor);
 
+    // Un e-mail ou un téléphone changé ne doit pas rejoindre un autre
+    // compte : la base le refuserait, mais avec un message illisible.
+    const taken = await this.prisma.user.findFirst({
+      where: {
+        id: { not: id },
+        OR: [
+          ...(dto.email && dto.email !== target.email ? [{ email: dto.email }] : []),
+          ...(dto.phone && dto.phone !== target.phone ? [{ phone: dto.phone }] : []),
+        ],
+      },
+      select: { email: true },
+    });
+
+    if (taken) {
+      throw AppException.conflict(
+        ERROR_CODES.CONFLICT,
+        taken.email === dto.email
+          ? 'Cette adresse e-mail est déjà utilisée.'
+          : 'Ce numéro de téléphone est déjà utilisé.',
+      );
+    }
+
     await this.prisma.user.update({ where: { id }, data: { ...dto } });
 
     await this.audit.record({
@@ -277,6 +299,7 @@ export class AdminsService {
       oldValue: {
         firstName: target.firstName,
         lastName: target.lastName,
+        email: target.email,
         phone: target.phone,
       },
       newValue: dto,

@@ -58,16 +58,36 @@ export class RestaurantScopeService {
    */
   async publicRestaurantId(): Promise<string> {
     const scope = restaurantContext.current();
+    if (!scope) return this.oldestId();
 
-    // Un client identifié : la maison la plus proche de chez lui,
-    // résolue une seule fois pour toute la requête.
-    if (scope?.customerId) {
-      scope.servedBy ??= this.router
-        .forCustomer(scope.customerId)
-        .then((id) => id ?? this.oldestId())
-        .catch(() => this.oldestId());
+    /*
+     * Trois sources, par ordre de confiance décroissant, résolues une
+     * seule fois pour toute la requête :
+     *
+     *  1. **La position que l'application désigne** — l'adresse choisie à
+     *     l'écran, ou le GPS. C'est ce que le client regarde ; le carnet
+     *     ne le sait pas.
+     *  2. **Son adresse par défaut**, quand l'application n'a rien dit.
+     *  3. **La maison la plus ancienne**, quand rien ne permet de le
+     *     situer.
+     *
+     * Le premier échelon manquait. Un client qui choisissait son adresse
+     * de Kipé lisait « Kipé » à l'écran et recevait la carte de Kaloum —
+     * puis se faisait refuser à la commande, sans pouvoir comprendre.
+     */
+    scope.servedBy ??= this.resolveServedBy(scope).catch(() => this.oldestId());
+    return scope.servedBy;
+  }
 
-      return scope.servedBy;
+  private async resolveServedBy(scope: NonNullable<ReturnType<typeof restaurantContext.current>>): Promise<string> {
+    if (scope.position) {
+      const proche = await this.router.nearestTo(scope.position);
+      if (proche) return proche;
+    }
+
+    if (scope.customerId) {
+      const proche = await this.router.forCustomer(scope.customerId);
+      if (proche) return proche;
     }
 
     return this.oldestId();

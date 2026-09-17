@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Address } from '@prisma/client';
 import { AppException, ERROR_CODES } from '../common/exceptions/app.exception';
 import { PrismaService } from '../database/prisma.service';
+import { regionDe } from '../geo/referentiel';
 import type { CreateAddressDto, UpdateAddressDto } from './dto/address.dto';
 
 /**
@@ -143,6 +144,8 @@ export class AddressesService {
       street: address.street,
       district: address.district,
       city: address.city,
+      /** La région de la ville, pour l'affichage ; nulle hors référentiel. */
+      region: regionDe(address.city),
       latitude: address.latitude,
       longitude: address.longitude,
       phone: address.phone,

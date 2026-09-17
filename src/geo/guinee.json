@@ -1,0 +1,74 @@
+{
+  "pays": "République de Guinée",
+  "regions": [
+    {
+      "nom": "Boké",
+      "prefectures": [
+        "Boké",
+        "Boffa",
+        "Fria",
+        "Gaoual",
+        "Koundara"
+      ]
+    },
+    {
+      "nom": "Kindia",
+      "prefectures": [
+        "Coyah",
+        "Dubréka",
+        "Forécariah",
+        "Kindia",
+        "Télimélé"
+      ]
+    },
+    {
+      "nom": "Mamou",
+      "prefectures": [
+        "Dalaba",
+        "Mamou",
+        "Pita"
+      ]
+    },
+    {
+      "nom": "Labé",
+      "prefectures": [
+        "Koubia",
+        "Labé",
+        "Lélouma",
+        "Mali",
+        "Tougué"
+      ]
+    },
+    {
+      "nom": "Faranah",
+      "prefectures": [
+        "Dabola",
+        "Faranah",
+        "Dinguiraye",
+        "Kissidougou"
+      ]
+    },
+    {
+      "nom": "Kankan",
+      "prefectures": [
+        "Kankan",
+        "Kérouané",
+        "Kouroussa",
+        "Mandiana",
+        "Siguiri"
+      ]
+    },
+    {
+      "nom": "N'zérékoré",
+      "prefectures": [
+        "Beyla",
+        "Guéckédou",
+        "Lola",
+        "Macenta",
+        "N'zérékoré",
+        "Yomou"
+      ]
+    }
+  ],
+  "total_prefectures": 33
+}

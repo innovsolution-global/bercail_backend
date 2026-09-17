@@ -311,3 +311,30 @@ export class DriverDeliveriesController {
     return this.deliveries.updateLocation(user, dto);
   }
 }
+
+/**
+ * Position du livreur d'une commande.
+ *
+ * Relue toutes les cinq secondes par l'écran de suivi du client pendant la
+ * course : la route renvoie la seule position, pas tout le suivi. La méthode
+ * existait au service, sans route pour l'atteindre — le client ne voyait donc
+ * la moto bouger qu'à la relecture complète du suivi, toutes les vingt
+ * secondes.
+ */
+@ApiTags('Deliveries')
+@Controller('orders')
+export class OrderDriverLocationController {
+  constructor(private readonly deliveries: DeliveriesService) {}
+
+  @Get(':orderId/driver-location')
+  @Roles(Role.CUSTOMER, Role.DRIVER, Role.ADMIN, Role.SUPER_ADMIN)
+  @ApiEndpoint({
+    summary: 'Position du livreur d’une commande',
+    description:
+      'Le client ne lit que celle de sa commande, et seulement tant que la course n’est pas terminée. `null` tant qu’aucune position n’a été transmise.',
+    roles: [Role.CUSTOMER, Role.DRIVER, Role.ADMIN, Role.SUPER_ADMIN],
+  })
+  driverLocation(@CurrentUser() user: AuthenticatedUser, @Param('orderId') orderId: string) {
+    return this.deliveries.locationForOrder(user, orderId);
+  }
+}

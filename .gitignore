@@ -13,3 +13,9 @@ storage/
 *.tsbuildinfo
 .idea/
 .vscode/
+
+# Copies de la base : lourdes, et contiennent des donnees personnelles.
+backups/
+
+# Clé privée du compte de service Firebase : pleins pouvoirs sur le projet.
+firebase-service-account.json

@@ -1,29 +1,39 @@
 import { Injectable } from '@nestjs/common';
+import { DishAvailabilityService } from '../common/context/dish-availability.service';
 import { AppException } from '../common/exceptions/app.exception';
 import { PrismaService } from '../database/prisma.service';
-import { toMenuItemDto } from '../menu/menu.mapper';
+import { STOCKOUTS_INCLUDE, toMenuItemDto } from '../menu/menu.mapper';
 
 /** Favoris d'un client. Strictement personnels. */
 @Injectable()
 export class FavoritesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly availability: DishAvailabilityService,
+  ) {}
 
   async list(userId: string) {
-    const favorites = await this.prisma.favorite.findMany({
-      where: { userId, menuItem: { deletedAt: null } },
-      include: {
-        menuItem: {
-          include: {
-            category: { select: { id: true, name: true } },
-            optionGroups: { include: { options: true } },
+    const [favorites, houses] = await Promise.all([
+      this.prisma.favorite.findMany({
+        where: { userId, menuItem: { deletedAt: null } },
+        include: {
+          menuItem: {
+            include: {
+              category: { select: { id: true, name: true } },
+              optionGroups: { include: { options: true } },
+              stockouts: STOCKOUTS_INCLUDE,
+            },
           },
         },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.availability.activeHouses(),
+    ]);
 
+    // Même lecture que la carte : disponible tant qu'une maison peut le
+    // préparer.
     return favorites.map((favorite) => ({
-      ...toMenuItemDto(favorite.menuItem),
+      ...toMenuItemDto(favorite.menuItem, { houses }),
       favoritedAt: favorite.createdAt.toISOString(),
     }));
   }

@@ -71,6 +71,8 @@ export interface AppConfiguration {
   };
   push: {
     driver: 'noop' | 'fcm';
+    /** Le fichier JSON du compte de service Firebase, tel que téléchargé. */
+    serviceAccountFile: string;
     fcmProjectId: string;
     fcmClientEmail: string;
     fcmPrivateKey: string;
@@ -255,6 +257,7 @@ export default (): AppConfiguration => {
 
     push: {
       driver: (process.env.PUSH_DRIVER as 'noop' | 'fcm') ?? 'noop',
+      serviceAccountFile: process.env.FIREBASE_SERVICE_ACCOUNT_FILE ?? '',
       fcmProjectId: process.env.FCM_PROJECT_ID ?? '',
       fcmClientEmail: process.env.FCM_CLIENT_EMAIL ?? '',
       fcmPrivateKey: (process.env.FCM_PRIVATE_KEY ?? '').replace(/\\n/g, '\n'),

@@ -535,6 +535,13 @@ export const SENSITIVE_PERMISSIONS: readonly Permission[] = PERMISSION_CATALOG.f
  * CUSTOMER et DRIVER n'ont aucune permission : leurs accès sont décidés par
  * les règles d'appartenance (ownership), jamais par une permission globale.
  * Le SUPER_ADMIN possède toutes les permissions, sans exception.
+ *
+ * **L'écriture de la carte n'est pas dans le socle d'un ADMIN.** Depuis le
+ * 14 septembre 2026 la carte — plats, catégories, promotions — est commune
+ * à toutes les maisons : un gérant qui change un prix le change partout.
+ * Ces droits ne sont donc plus acquis d'office ; le SUPER_ADMIN les accorde,
+ * ou non, à la création du compte (voir [[CATALOG_WRITE_PERMISSIONS]]). Ils
+ * restent délégables : ils ne figurent pas dans les permissions réservées.
  */
 export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
   CUSTOMER: [],
@@ -549,11 +556,7 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'DRIVERS_UPDATE',
     'DRIVERS_SUSPEND',
     'MENU_READ',
-    'MENU_CREATE',
-    'MENU_UPDATE',
-    'MENU_DELETE',
     'MENU_AVAILABILITY',
-    'CATEGORIES_MANAGE',
     'ORDERS_READ',
     'ORDERS_UPDATE_STATUS',
     'ORDERS_ASSIGN_DRIVER',
@@ -566,9 +569,6 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
     'DELIVERIES_UPDATE',
     'DELIVERIES_TRACK',
     'PROMOTIONS_READ',
-    'PROMOTIONS_CREATE',
-    'PROMOTIONS_UPDATE',
-    'PROMOTIONS_DELETE',
     'POS_SELL',
     'STOCK_READ',
     'STOCK_MANAGE',
@@ -586,6 +586,22 @@ export const ROLE_PERMISSIONS: Record<string, readonly Permission[]> = {
   ],
   SUPER_ADMIN: [...PERMISSIONS],
 };
+
+/**
+ * Écriture de la carte commune.
+ *
+ * Hors du socle ADMIN, mais délégable : c'est le SUPER_ADMIN qui décide, en
+ * créant un compte, s'il peut modifier ce que toutes les maisons servent.
+ */
+export const CATALOG_WRITE_PERMISSIONS: readonly Permission[] = [
+  'MENU_CREATE',
+  'MENU_UPDATE',
+  'MENU_DELETE',
+  'CATEGORIES_MANAGE',
+  'PROMOTIONS_CREATE',
+  'PROMOTIONS_UPDATE',
+  'PROMOTIONS_DELETE',
+];
 
 /** Permissions qu'un SUPER_ADMIN ne peut jamais déléguer à un ADMIN. */
 export const SUPER_ADMIN_ONLY_PERMISSIONS: readonly Permission[] = [

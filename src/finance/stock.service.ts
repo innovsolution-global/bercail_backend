@@ -34,6 +34,8 @@ export interface MovementInput {
   occurredAt?: Date;
   note?: string | null;
   purchaseId?: string | null;
+  /** La commande servie, pour une sortie de préparation. */
+  orderId?: string | null;
   createdById?: string | null;
   /**
    * Autorise le stock à passer sous zéro.
@@ -483,6 +485,7 @@ export class StockService {
         totalCost: Math.round(movementQuantity * unitCost),
         note: input.note ?? null,
         purchaseId: input.purchaseId ?? null,
+        orderId: input.orderId ?? null,
         createdById: input.createdById ?? null,
         occurredAt: input.occurredAt ?? new Date(),
       },

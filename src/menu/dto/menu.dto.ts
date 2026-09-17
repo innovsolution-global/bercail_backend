@@ -27,14 +27,6 @@ const toBoolean = ({ value }: { value: unknown }) => {
 /* ───────────────────────────── Catégories ─────────────────────────────── */
 
 export class CreateCategoryDto {
-  @ApiPropertyOptional({
-    description:
-      'Établissement visé. Inutile pour un ADMIN — il écrit dans le sien ; obligatoire pour un SUPER_ADMIN, qui les voit tous.',
-  })
-  @IsOptional()
-  @IsUUID()
-  restaurantId?: string;
-
   @ApiProperty({ example: 'Grillades' })
   @IsString()
   @IsNotEmpty()
@@ -174,14 +166,6 @@ export class MenuOptionGroupInputDto {
 /* ───────────────────────────── Produits ───────────────────────────────── */
 
 export class CreateMenuItemDto {
-  @ApiPropertyOptional({
-    description:
-      'Établissement visé. Inutile pour un ADMIN — il écrit dans le sien ; obligatoire pour un SUPER_ADMIN, qui les voit tous.',
-  })
-  @IsOptional()
-  @IsUUID()
-  restaurantId?: string;
-
   @ApiProperty()
   @IsUUID()
   categoryId!: string;

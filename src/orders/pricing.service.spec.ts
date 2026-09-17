@@ -157,15 +157,17 @@ describe('PricingService', () => {
   });
 
   describe('validation des options', () => {
-    it('exige les groupes obligatoires', async () => {
+    it('accepte un plat commandé sans accompagnement', async () => {
+      // Décision du propriétaire : un accompagnement est toujours
+      // facultatif, même sur un groupe marqué « obligatoire » en base.
       const { service } = buildService();
 
-      await expect(
-        service.quote({
-          lines: [{ menuItemId: 'item-poulet', quantity: 1, optionIds: [] }],
-          orderType: OrderType.DELIVERY,
-        }),
-      ).rejects.toThrow(/Choisissez « Accompagnement »/);
+      const quote = await service.quote({
+        lines: [{ menuItemId: 'item-poulet', quantity: 1, optionIds: [] }],
+        orderType: OrderType.DELIVERY,
+      });
+
+      expect(quote.lines[0].options).toEqual([]);
     });
 
     it('refuse une option qui n’appartient pas au plat', async () => {
@@ -392,42 +394,51 @@ describe('PricingService', () => {
   });
 
   /**
-   * Le cloisonnement par établissement.
+   * La maison qui chiffre.
    *
-   * Un client n'appartient à aucune maison — c'est voulu, il commande où
-   * il veut — donc l'extension Prisma qui cloisonne les lectures ne
-   * s'applique pas à lui. La barrière doit donc exister **ici**, au
-   * moment où l'on chiffre : sans elle, un plat ou un code d'une autre
-   * adresse se règle au tarif de celle-ci, frais de livraison et
-   * minimum de commande compris.
+   * La carte est commune depuis le 14 septembre 2026 : les plats ne
+   * désignent plus de cuisine. Le devis se fait chez la maison que
+   * l'appelant désigne — celle qui préparera —, sinon chez celle qui sert
+   * la requête. Et un code promotionnel vaut dans toutes les maisons.
    */
-  describe('cloisonnement par établissement', () => {
+  describe('maison qui chiffre', () => {
     const filtre = (appel: unknown): Record<string, unknown> =>
       (appel as { where: Record<string, unknown> }).where;
 
-    it('chiffre chez la maison dont viennent les plats', async () => {
-      // Le devis chiffrait chez la maison du contexte — celle qui sert
-      // la carte au moment de l'appel. Un panier rempli avant un
-      // changement d'adresse devenait alors « introuvable ». Ce sont les
-      // plats qui désignent leur cuisine, et c'est **ses** frais qu'on
-      // applique.
-      const { service, prisma, settings } = buildService();
+    it('chiffre chez la maison désignée par l’appelant', async () => {
+      // C'est le cas d'une commande : la maison la plus proche de
+      // l'adresse livrée applique ses frais et son minimum.
+      const { service, settings } = buildService();
+
+      await service.quote({
+        lines: [{ menuItemId: 'item-jus', quantity: 1 }],
+        orderType: OrderType.PICKUP,
+        restaurantId: 'restaurant-2',
+      });
+
+      expect(settings.byId).toHaveBeenCalledWith('restaurant-2');
+      expect(settings.getRestaurantCached).not.toHaveBeenCalled();
+    });
+
+    it('chiffre chez la maison de la requête quand personne ne la désigne', async () => {
+      // L'aperçu du panier : on ne sait pas encore où le repas ira, on
+      // chiffre chez la maison qui sert le client.
+      const { service, settings } = buildService();
 
       await service.quote({
         lines: [{ menuItemId: 'item-jus', quantity: 1 }],
         orderType: OrderType.PICKUP,
       });
 
-      expect(settings.byId).toHaveBeenCalledWith('restaurant-1');
-      expect(settings.getRestaurantCached).not.toHaveBeenCalled();
-      expect(filtre(prisma.menuItem.findMany.mock.calls[0][0]).restaurantId).toBeUndefined();
+      expect(settings.getRestaurantCached).toHaveBeenCalled();
+      expect(settings.byId).not.toHaveBeenCalled();
     });
 
-    it('refuse un panier qui mélange deux maisons', async () => {
-      // On ne facture pas un plat de Kipé au tarif de livraison de
-      // Kaloum : deux cuisines dans un devis, et il n'y a pas de devis.
+    it('accepte des plats venus de n’importe où sur la carte', async () => {
+      // Il n'y a plus deux cartes à mélanger : le refus « deux
+      // établissements » n'a plus de raison d'être.
       const { service } = buildService({
-        items: [pouletBraise, { ...jus, restaurantId: 'restaurant-2' }],
+        items: [pouletBraise, jus],
       });
 
       await expect(
@@ -438,13 +449,10 @@ describe('PricingService', () => {
           ],
           orderType: OrderType.PICKUP,
         }),
-      ).rejects.toThrow(/deux établissements/);
+      ).resolves.toBeDefined();
     });
 
-    it('ne cherche un code promotionnel que dans cette maison', async () => {
-      // Une remise est offerte par une maison sur ses propres marges :
-      // un code de la seconde adresse ne doit pas entamer la recette de
-      // la première.
+    it('cherche un code promotionnel dans toute l’enseigne', async () => {
       const { service, prisma } = buildService({
         promotion: {
           id: 'promo-1',
@@ -470,7 +478,7 @@ describe('PricingService', () => {
         promotionCode: 'BIENVENUE10',
       });
 
-      expect(filtre(prisma.promotion.findFirst.mock.calls[0][0]).restaurantId).toBe(restaurant.id);
+      expect(filtre(prisma.promotion.findFirst.mock.calls[0][0]).restaurantId).toBeUndefined();
     });
   });
 });

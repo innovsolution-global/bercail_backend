@@ -191,14 +191,6 @@ export class DriversService {
     };
   }
 
-  async zones(): Promise<string[]> {
-    const rows = await this.prisma.driverProfile.findMany({
-      distinct: ['zone'],
-      select: { zone: true },
-      orderBy: { zone: 'asc' },
-    });
-    return rows.map((row) => row.zone);
-  }
 
   // ─────────────────────────────── Création ───────────────────────────────
 

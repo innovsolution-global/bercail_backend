@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import { DishAvailabilityService } from '../common/context/dish-availability.service';
+import { restaurantContext } from '../common/context/restaurant-context';
 import { RestaurantScopeService } from '../common/context/restaurant-scope.service';
 import { paginate, type PaginatedResult } from '../common/dto/paginated-result';
 import { AppException, ERROR_CODES } from '../common/exceptions/app.exception';
@@ -14,13 +16,14 @@ import type {
   MenuOptionGroupInputDto,
   UpdateMenuItemDto,
 } from './dto/menu.dto';
-import { toMenuItemDto } from './menu.mapper';
+import { STOCKOUTS_INCLUDE, toMenuItemDto, type AvailabilityView } from './menu.mapper';
 
 const CACHE_PREFIX = 'menu:items';
 
 const ITEM_INCLUDE = {
   category: { select: { id: true, name: true } },
   optionGroups: { include: { options: true }, orderBy: { sortOrder: 'asc' } },
+  stockouts: STOCKOUTS_INCLUDE,
 } satisfies Prisma.MenuItemInclude;
 
 /**
@@ -38,10 +41,24 @@ export class MenuItemsService {
     private readonly audit: AuditService,
     private readonly config: ConfigService,
     private readonly scope: RestaurantScopeService,
+    private readonly availability: DishAvailabilityService,
   ) {}
 
   private get ttl(): number {
     return this.config.get<number>('cache.menuTtlSeconds') ?? 300;
+  }
+
+  /**
+   * De quel point de vue lire la disponibilité.
+   *
+   * Le public voit l'enseigne : un plat lui reste offert tant qu'une
+   * maison peut le préparer. Un gérant — ou le propriétaire qui a choisi
+   * une adresse — voit sa maison. En vue d'ensemble, on lit l'interrupteur
+   * global, et la liste nommée des maisons où c'est épuisé.
+   */
+  private async view(publicOnly: boolean): Promise<AvailabilityView> {
+    if (publicOnly) return { houses: await this.availability.activeHouses() };
+    return { at: restaurantContext.activeRestaurantId() };
   }
 
   private async invalidate(): Promise<void> {
@@ -55,11 +72,15 @@ export class MenuItemsService {
     query: MenuItemQueryDto,
     options: { publicOnly?: boolean } = {},
   ): Promise<PaginatedResult<ReturnType<typeof toMenuItemDto>>> {
-    const where = await this.buildWhere(query, options.publicOnly ?? false);
+    const publicOnly = options.publicOnly ?? false;
+    const [where, view] = await Promise.all([
+      this.buildWhere(query, publicOnly),
+      this.view(publicOnly),
+    ]);
 
     // Le catalogue public est très sollicité : on met en cache la page.
     const cacheKey = options.publicOnly
-      ? `${CACHE_PREFIX}:public:${where.restaurantId as string}:${JSON.stringify({
+      ? `${CACHE_PREFIX}:public:${JSON.stringify({
           ...query,
           page: query.page,
           limit: query.limit,
@@ -78,7 +99,12 @@ export class MenuItemsService {
         this.prisma.menuItem.count({ where }),
       ]);
 
-      return paginate(rows.map(toMenuItemDto), total, query.page, query.limit);
+      return paginate(
+        rows.map((row) => toMenuItemDto(row, view)),
+        total,
+        query.page,
+        query.limit,
+      );
     };
 
     if (!cacheKey) return load();
@@ -86,43 +112,38 @@ export class MenuItemsService {
   }
 
   async findOne(id: string, options: { publicOnly?: boolean } = {}) {
-    const item = await this.prisma.menuItem.findFirst({
-      where: {
-        id,
-        deletedAt: null,
-        ...(options.publicOnly
-          ? {
-              category: { isActive: true, deletedAt: null },
-              restaurantId: await this.scope.publicRestaurantId(),
-            }
-          : {}),
-      },
-      include: ITEM_INCLUDE,
-    });
+    const publicOnly = options.publicOnly ?? false;
+    const [item, view] = await Promise.all([
+      this.prisma.menuItem.findFirst({
+        where: {
+          id,
+          deletedAt: null,
+          ...(publicOnly ? { category: { isActive: true, deletedAt: null } } : {}),
+        },
+        include: ITEM_INCLUDE,
+      }),
+      this.view(publicOnly),
+    ]);
 
     if (!item) throw AppException.notFound('Plat introuvable.');
-    return toMenuItemDto(item);
+    return toMenuItemDto(item, view);
   }
 
   /**
    * Sélection éditoriale de l'accueil Flutter, en une seule requête.
    *
-   * Route publique de bout en bout : elle ne sert que l'établissement
-   * montré au client, jamais un plat d'une autre maison au milieu des
-   * incontournables.
+   * La carte étant commune à toutes les maisons, la sélection l'est aussi.
    */
   async highlights() {
-    const restaurantId = await this.scope.publicRestaurantId();
-
-    return this.redis.remember(`${CACHE_PREFIX}:highlights:${restaurantId}`, this.ttl, async () => {
+    return this.redis.remember(`${CACHE_PREFIX}:highlights`, this.ttl, async () => {
+      const [orderable, view] = await Promise.all([this.orderableSomewhere(), this.view(true)]);
       const [popular, suggestions] = await Promise.all([
         this.prisma.menuItem.findMany({
           where: {
-            restaurantId,
             deletedAt: null,
-            isAvailable: true,
             isPopular: true,
             category: { isActive: true },
+            ...orderable,
           },
           include: ITEM_INCLUDE,
           orderBy: { ordersCount: 'desc' },
@@ -130,11 +151,10 @@ export class MenuItemsService {
         }),
         this.prisma.menuItem.findMany({
           where: {
-            restaurantId,
             deletedAt: null,
-            isAvailable: true,
             isSuggestion: true,
             category: { isActive: true },
+            ...orderable,
           },
           include: ITEM_INCLUDE,
           orderBy: { updatedAt: 'desc' },
@@ -143,10 +163,25 @@ export class MenuItemsService {
       ]);
 
       return {
-        popular: popular.map(toMenuItemDto),
-        suggestions: suggestions.map(toMenuItemDto),
+        popular: popular.map((item) => toMenuItemDto(item, view)),
+        suggestions: suggestions.map((item) => toMenuItemDto(item, view)),
       };
     });
+  }
+
+  /**
+   * Le filtre public : à la carte, et pas épuisé partout.
+   *
+   * Un plat épuisé dans une seule maison reste sur la carte — la commande
+   * ira ailleurs. Il n'en sort que lorsque plus aucune maison ne peut le
+   * préparer.
+   */
+  private async orderableSomewhere(): Promise<Prisma.MenuItemWhereInput> {
+    const epuisesPartout = await this.availability.soldOutEverywhere();
+    return {
+      isAvailable: true,
+      ...(epuisesPartout.length > 0 ? { id: { notIn: epuisesPartout } } : {}),
+    };
   }
 
   // ─────────────────────────────── Écriture ───────────────────────────────
@@ -158,7 +193,6 @@ export class MenuItemsService {
     const item = await this.prisma.transaction(async (tx) => {
       const created = await tx.menuItem.create({
         data: {
-          restaurantId: this.scope.resolve(dto.restaurantId),
           categoryId: dto.categoryId,
           name: dto.name,
           shortDescription: dto.shortDescription ?? '',
@@ -261,34 +295,80 @@ export class MenuItemsService {
     return toMenuItemDto(item);
   }
 
+  /**
+   * Disponible, ou épuisé.
+   *
+   * Le même geste n'a pas la même portée selon qui le fait :
+   *
+   *  • **dans une maison** — un gérant, ou le propriétaire qui a choisi
+   *    une adresse — « épuisé » ne vaut que là. Les autres maisons
+   *    continuent de servir le plat, et les commandes des clients proches
+   *    de celle-ci basculent chez elles ;
+   *  • **en vue d'ensemble**, le propriétaire retire le plat de la carte
+   *    pour toute l'enseigne, ou l'y remet.
+   *
+   * Un plat retiré de la carte ne se remet pas depuis une maison : le
+   * gérant n'a pas la main sur l'enseigne, et son geste échouerait en
+   * silence — d'où le refus explicite.
+   */
   async setAvailability(
     id: string,
     isAvailable: boolean,
     actor: AuthenticatedUser,
     context: RequestContext,
   ) {
-    const existing = await this.prisma.menuItem.findFirst({ where: { id, deletedAt: null } });
+    const existing = await this.prisma.menuItem.findFirst({
+      where: { id, deletedAt: null },
+      include: { stockouts: STOCKOUTS_INCLUDE },
+    });
     if (!existing) throw AppException.notFound('Plat introuvable.');
 
-    const item = await this.prisma.menuItem.update({
+    const maison = restaurantContext.activeRestaurantId();
+
+    if (maison) {
+      if (isAvailable && !existing.isAvailable) {
+        throw AppException.badRequest(
+          ERROR_CODES.VALIDATION_ERROR,
+          'Ce plat est retiré de la carte pour toute l’enseigne. Seule la vue d’ensemble peut l’y remettre.',
+        );
+      }
+
+      if (isAvailable) {
+        await this.prisma.menuItemStockout.deleteMany({
+          where: { menuItemId: id, restaurantId: maison },
+        });
+      } else {
+        await this.prisma.menuItemStockout.upsert({
+          where: { menuItemId_restaurantId: { menuItemId: id, restaurantId: maison } },
+          update: {},
+          create: { menuItemId: id, restaurantId: maison },
+        });
+      }
+    } else {
+      await this.prisma.menuItem.update({ where: { id }, data: { isAvailable } });
+    }
+
+    const item = await this.prisma.menuItem.findUniqueOrThrow({
       where: { id },
-      data: { isAvailable },
       include: ITEM_INCLUDE,
     });
 
     await this.invalidate();
     await this.audit.record({
       actor,
-      action: 'MENU_ITEM_AVAILABILITY',
+      action: maison ? 'MENU_ITEM_STOCKOUT' : 'MENU_ITEM_AVAILABILITY',
       module: 'menu',
       entityType: 'MenuItem',
       entityId: id,
-      oldValue: { isAvailable: existing.isAvailable },
-      newValue: { isAvailable },
+      oldValue: {
+        isAvailable: toMenuItemDto(existing, { at: maison }).isAvailable,
+        ...(maison ? { restaurantId: maison } : {}),
+      },
+      newValue: { isAvailable, ...(maison ? { restaurantId: maison } : {}) },
       context,
     });
 
-    return toMenuItemDto(item);
+    return toMenuItemDto(item, { at: maison });
   }
 
   /**
@@ -377,8 +457,10 @@ export class MenuItemsService {
       const data = {
         menuItemId,
         name: group.name,
-        isRequired: group.isRequired ?? false,
-        minSelect: group.minSelect ?? (group.isRequired ? 1 : 0),
+        // Jamais obligatoire, quoi que le formulaire envoie : un
+        // accompagnement ne doit pas empêcher de commander le plat seul.
+        isRequired: false,
+        minSelect: group.minSelect ?? 0,
         maxSelect: group.maxSelect ?? 1,
         sortOrder: group.sortOrder ?? groupIndex,
       };
@@ -423,27 +505,27 @@ export class MenuItemsService {
     const where: Prisma.MenuItemWhereInput = { deletedAt: null };
 
     if (publicOnly) {
-      where.isAvailable = true;
+      Object.assign(where, await this.orderableSomewhere());
       where.category = { isActive: true, deletedAt: null };
-      // Un client lit la carte d'une maison, pas la somme de toutes.
-      where.restaurantId = await this.scope.publicRestaurantId();
-    } else if (query.availability === 'available') {
-      where.isAvailable = true;
-    } else if (query.availability === 'unavailable') {
-      where.isAvailable = false;
+    } else if (query.availability === 'available' || query.availability === 'unavailable') {
+      // Dans une maison, « indisponible » couvre aussi ce qui y est
+      // épuisé ; en vue d'ensemble, seul l'interrupteur global compte.
+      const maison = restaurantContext.activeRestaurantId();
+      const disponibleIci: Prisma.MenuItemWhereInput = {
+        isAvailable: true,
+        ...(maison ? { stockouts: { none: { restaurantId: maison } } } : {}),
+      };
+      where.AND =
+        query.availability === 'available' ? [disponibleIci] : [{ NOT: disponibleIci }];
     }
 
     if (query.categoryId && query.categoryId !== 'all') {
       // On accepte l'identifiant ou le slug : l'application mobile
-      // navigue par slug, le back-office par identifiant.
-      // Le slug se répète d'un établissement à l'autre — « grillades »
-      // existe dans les deux — donc la recherche est ramenée à la même
-      // maison que le reste de la requête, sans quoi « Grillades »
-      // ouvrirait la catégorie de l'autre.
+      // navigue par slug, le back-office par identifiant. Le slug est
+      // unique pour toute l'enseigne, la carte étant commune.
       const category = await this.prisma.category.findFirst({
         where: {
           OR: [{ id: query.categoryId }, { slug: query.categoryId }],
-          ...(where.restaurantId ? { restaurantId: where.restaurantId as string } : {}),
         },
         select: { id: true },
       });

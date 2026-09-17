@@ -432,13 +432,18 @@ export class SettingsService implements OnModuleInit {
     const restaurant = restaurantId
         ? await this.byId(restaurantId)
         : await this.getRestaurantCached();
+    this.assertOpen(restaurant);
+    return restaurant;
+  }
+
+  /** Refuse une commande hors des heures de service de cette maison. */
+  assertOpen(restaurant: RestaurantWithHours): void {
     if (!this.isOpenNow(restaurant)) {
       throw AppException.conflict(
         ERROR_CODES.RESTAURANT_CLOSED,
         'Le restaurant est actuellement fermé. Réessayez pendant les heures de service.',
       );
     }
-    return restaurant;
   }
 
   /**

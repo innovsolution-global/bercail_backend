@@ -11,8 +11,11 @@ import {
 import { AuditService } from '../audit/audit.service';
 import { AppException, ERROR_CODES } from '../common/exceptions/app.exception';
 import type { AuthenticatedUser, RequestContext } from '../common/types/authenticated-user';
-import { randomToken, sha256 } from '../common/utils/crypto.util';
+import { randomNumericCode, randomToken, sha256 } from '../common/utils/crypto.util';
 import { PrismaService } from '../database/prisma.service';
+import { MailService } from '../mail/mail.service';
+import { passwordResetCode } from '../mail/mail.templates';
+import { RealtimeService } from '../realtime/realtime.service';
 import { PermissionsService } from '../rbac/permissions.service';
 import { toAuthUser, type AuthUserDto } from '../users/user.mapper';
 import type {
@@ -55,6 +58,8 @@ export class AuthService {
     private readonly permissions: PermissionsService,
     private readonly audit: AuditService,
     private readonly config: ConfigService,
+    private readonly realtime: RealtimeService,
+    private readonly mail: MailService,
   ) {}
 
   private get isProduction(): boolean {
@@ -288,6 +293,27 @@ export class AuthService {
       await this.tokens.revokeAllForUser(user.id);
     }
 
+    /*
+     * Un livreur qui se déconnecte n'est plus en service.
+     *
+     * Sa présence est celle de son application : en ligne tant qu'il y est
+     * connecté, hors ligne dès qu'il la quitte. Sans cette ligne, il
+     * restait « en ligne » une demi-heure après avoir fermé sa session, et
+     * le back-office pouvait lui confier une course qu'il ne verrait pas.
+     */
+    if (user.role === Role.DRIVER && user.driverProfileId) {
+      const profile = await this.prisma.driverProfile.update({
+        where: { id: user.driverProfileId },
+        data: { isOnline: false, isAvailable: false, lastSeenAt: new Date() },
+      });
+      this.realtime.driverStatusUpdated({
+        driverProfileId: profile.id,
+        restaurantId: user.restaurantId ?? null,
+        isOnline: false,
+        isAvailable: false,
+      });
+    }
+
     await this.audit.record({
       actor: user,
       action: 'AUTH_LOGOUT',
@@ -409,12 +435,29 @@ export class AuthService {
       where: { email: dto.email, deletedAt: null },
     });
 
-    const response: { sent: true; resetToken?: string } = { sent: true };
+    const response: { sent: true; resetToken?: string; resetCode?: string } = { sent: true };
 
     if (!user) return response;
 
     const ttlMinutes = this.config.get<number>('security.resetTokenTtlMinutes') ?? 30;
+
+    /*
+     * Deux clés pour la même demande, envoyées dans le même e-mail :
+     *
+     *  • un **code à six chiffres**, que le client tape dans l'application
+     *    mobile — on ne recopie pas un lien de soixante caractères sur un
+     *    téléphone ;
+     *  • un **jeton long**, porté par le lien que le back-office ouvre.
+     *
+     * Le code est court, donc devinable : il n'est valable que pour ce
+     * compte (son empreinte mêle l'identifiant du compte), il expire, il ne
+     * sert qu'une fois, et la route est plafonnée à cinq essais par quart
+     * d'heure. Aucun e-mail ne partait avant : le jeton n'était que
+     * journalisé, et « Envoyer le code » n'envoyait rien.
+     */
     const token = randomToken();
+    const code = randomNumericCode(6);
+    const expiresAt = new Date(Date.now() + ttlMinutes * 60_000);
 
     await this.prisma.transaction(async (tx) => {
       // Une seule demande valable à la fois.
@@ -422,15 +465,37 @@ export class AuthService {
         where: { userId: user.id, purpose: AuthTokenPurpose.PASSWORD_RESET, usedAt: null },
         data: { usedAt: new Date() },
       });
-      await tx.authToken.create({
-        data: {
-          userId: user.id,
-          purpose: AuthTokenPurpose.PASSWORD_RESET,
-          tokenHash: sha256(token),
-          expiresAt: new Date(Date.now() + ttlMinutes * 60_000),
-        },
+      await tx.authToken.createMany({
+        data: [
+          {
+            userId: user.id,
+            purpose: AuthTokenPurpose.PASSWORD_RESET,
+            tokenHash: sha256(token),
+            expiresAt,
+          },
+          {
+            userId: user.id,
+            purpose: AuthTokenPurpose.PASSWORD_RESET,
+            tokenHash: sha256(this.codeKey(user.id, code)),
+            expiresAt,
+          },
+        ],
       });
     });
+
+    const backOfficeUrl = (this.config.get<string>('mail.backOfficeUrl') ?? '').replace(/\/$/, '');
+    const sent = await this.mail.send(
+      passwordResetCode({
+        to: user.email,
+        firstName: user.firstName,
+        code,
+        resetUrl: `${backOfficeUrl}/reset-password?token=${encodeURIComponent(token)}`,
+        expiresInMinutes: ttlMinutes,
+      }),
+    );
+    if (!sent) {
+      this.logger.error(`E-mail de réinitialisation non expédié à ${user.email}.`);
+    }
 
     await this.audit.record({
       actor: { id: user.id, firstName: user.firstName, lastName: user.lastName, role: user.role },
@@ -442,20 +507,41 @@ export class AuthService {
     });
 
     if (!this.isProduction) {
-      // Hors production, le jeton est renvoyé pour permettre de dérouler
-      // le scénario sans service d'e-mail. Jamais en production.
-      this.logger.warn(`Jeton de réinitialisation (dev) pour ${user.email} : ${token}`);
+      // Hors production, le code et le jeton sont renvoyés pour dérouler
+      // le scénario sans boîte mail. Jamais en production.
+      this.logger.warn(`Réinitialisation (dev) pour ${user.email} : code ${code}, jeton ${token}`);
       response.resetToken = token;
+      response.resetCode = code;
     }
 
     return response;
   }
 
+  /** L'empreinte d'un code court mêle le compte : le même code chez deux personnes ne se confond pas. */
+  private codeKey(userId: string, code: string): string {
+    return `${userId}:${code.replace(/\s+/g, '')}`;
+  }
+
   async resetPassword(dto: ResetPasswordDto, context: RequestContext) {
     this.passwords.validate(dto.password);
 
-    const stored = await this.prisma.authToken.findUnique({
-      where: { tokenHash: sha256(dto.token) },
+    /*
+     * Le jeton du lien se cherche tel quel ; le code à six chiffres se
+     * cherche pour le compte de l'adresse donnée. Sans compte à cette
+     * adresse, on cherche quand même le jeton long — et on répond la même
+     * chose qu'à un code faux : rien ne dit si l'adresse existe.
+     */
+    const owner = dto.email
+      ? await this.prisma.user.findFirst({
+          where: { email: dto.email, deletedAt: null },
+          select: { id: true },
+        })
+      : null;
+    const hashes = [sha256(dto.token)];
+    if (owner) hashes.push(sha256(this.codeKey(owner.id, dto.token)));
+
+    const stored = await this.prisma.authToken.findFirst({
+      where: { tokenHash: { in: hashes } },
       include: { user: true },
     });
 
@@ -467,7 +553,7 @@ export class AuthService {
     ) {
       throw AppException.badRequest(
         ERROR_CODES.INVALID_TOKEN,
-        'Ce lien de réinitialisation est invalide ou expiré.',
+        'Ce code est invalide ou expiré. Demandez-en un nouveau.',
       );
     }
 
@@ -483,7 +569,11 @@ export class AuthService {
           lockedUntil: null,
         },
       });
-      await tx.authToken.update({ where: { id: stored.id }, data: { usedAt: new Date() } });
+      // Le code et le lien de la même demande tombent ensemble.
+      await tx.authToken.updateMany({
+        where: { userId: stored.userId, purpose: AuthTokenPurpose.PASSWORD_RESET, usedAt: null },
+        data: { usedAt: new Date() },
+      });
     });
 
     // Un mot de passe changé ferme toutes les sessions ouvertes.

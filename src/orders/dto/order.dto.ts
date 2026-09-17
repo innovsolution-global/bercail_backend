@@ -6,6 +6,8 @@ import {
   IsArray,
   IsIn,
   IsInt,
+  IsLatitude,
+  IsLongitude,
   IsNotEmpty,
   IsOptional,
   IsString,
@@ -78,6 +80,32 @@ export class CreateOrderDto {
   @IsOptional()
   @IsUUID()
   addressId?: string;
+
+  /*
+   * **Où livrer, maintenant.**
+   *
+   * La position du client au moment où il commande — relevée par son
+   * téléphone, ou posée sur la carte. C'est elle, et non celle de son
+   * adresse enregistrée, qui désigne la maison la plus proche et guide
+   * le livreur : quelqu'un enregistre son adresse au bureau, à Kaloum,
+   * et commande le soir de chez lui, à Sonfonia. Sans elle, la commande
+   * partait de Kaloum et le livreur roulait vers un bureau vide.
+   *
+   * Obligatoire pour une livraison ; le serveur retombe sur la position
+   * de l'adresse, si elle en a une, pour les applications qui ne
+   * l'envoient pas encore.
+   */
+  @ApiPropertyOptional({ example: 9.6385, description: 'Position de livraison : latitude.' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsLatitude({ message: 'La latitude n’est pas valide.' })
+  latitude?: number;
+
+  @ApiPropertyOptional({ example: -13.6215, description: 'Position de livraison : longitude.' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsLongitude({ message: 'La longitude n’est pas valide.' })
+  longitude?: number;
 
   @ApiProperty({ enum: PAYMENT_METHODS_WIRE })
   @IsIn(PAYMENT_METHODS_WIRE)

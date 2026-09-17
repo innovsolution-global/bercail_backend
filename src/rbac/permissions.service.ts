@@ -226,15 +226,29 @@ export class PermissionsService implements OnModuleInit {
     const idByCode = new Map(stored.map((entry) => [entry.code, entry.id]));
 
     for (const [role, permissions] of Object.entries(ROLE_PERMISSIONS)) {
+      const attendus: string[] = [];
       for (const code of permissions) {
         const permissionId = idByCode.get(code);
         if (!permissionId) continue;
+        attendus.push(permissionId);
         await this.prisma.rolePermission.upsert({
           where: { role_permissionId: { role: role as Role, permissionId } },
           update: {},
           create: { role: role as Role, permissionId },
         });
       }
+
+      /*
+       * Et ce qui ne fait plus partie du socle en sort.
+       *
+       * La synchronisation ne faisait qu'ajouter : retirer un droit du
+       * socle dans le code le laissait en base pour toujours. Les gardes
+       * lisent la constante, donc la sécurité n'en souffrait pas — mais la
+       * table affichait un socle qui n'était plus le vrai.
+       */
+      await this.prisma.rolePermission.deleteMany({
+        where: { role: role as Role, permissionId: { notIn: attendus } },
+      });
     }
   }
 }

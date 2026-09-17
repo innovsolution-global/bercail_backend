@@ -21,6 +21,7 @@ import { ResponseInterceptor } from './common/interceptors/response.interceptor'
 import { RequestContextMiddleware } from './common/middleware/request-context.middleware';
 import { RestaurantScopeMiddleware } from './common/middleware/restaurant-scope.middleware';
 import { createValidationPipe } from './common/pipes/validation.pipe';
+import { BackupService } from './common/tasks/backup.service';
 import { MaintenanceService } from './common/tasks/maintenance.service';
 import configuration from './config/configuration';
 import { validateEnv } from './config/env.validation';
@@ -30,6 +31,7 @@ import { DeliveriesModule } from './deliveries/deliveries.module';
 import { DriversModule } from './drivers/drivers.module';
 import { FavoritesModule } from './favorites/favorites.module';
 import { FinanceModule } from './finance/finance.module';
+import { GeoModule } from './geo/geo.module';
 import { HealthModule } from './health/health.module';
 import { MenuModule } from './menu/menu.module';
 import { MailModule } from './mail/mail.module';
@@ -113,9 +115,11 @@ import { SyncModule } from './sync/sync.module';
     ReportsModule,
     SearchModule,
     HealthModule,
+    GeoModule,
   ],
   providers: [
     MaintenanceService,
+    BackupService,
 
     // 1. Limitation de débit
     { provide: APP_GUARD, useClass: ThrottlerBehindProxyGuard },

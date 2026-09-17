@@ -3,6 +3,7 @@ import { Transform, Type } from 'class-transformer';
 import {
   IsBoolean,
   IsDefined,
+  IsIn,
   IsLatitude,
   IsLongitude,
   IsNotEmpty,
@@ -12,6 +13,7 @@ import {
   MaxLength,
 } from 'class-validator';
 import { PHONE_PATTERN } from '../../auth/dto/auth.dto';
+import { VILLES, VILLE_INCONNUE } from '../../geo/referentiel';
 
 const toBoolean = ({ value }: { value: unknown }) => {
   if (typeof value === 'boolean') return value;
@@ -39,32 +41,47 @@ export class CreateAddressDto {
   @MaxLength(120)
   district?: string;
 
-  @ApiPropertyOptional({ example: 'Conakry' })
+  /**
+   * La ville : Conakry, ou l'une des préfectures de Guinée.
+   *
+   * Prise dans le référentiel ([[REGIONS]]) et non tapée : une ville
+   * écrite librement ne se retrouve ni dans un filtre ni dans un rapport.
+   * Le quartier reste libre — à Conakry, l'application propose les
+   * communes ; ailleurs, il n'y a pas de liste.
+   */
+  @ApiPropertyOptional({ example: 'Conakry', enum: VILLES })
   @IsOptional()
   @IsString()
-  @MaxLength(120)
+  @IsIn(VILLES, { message: VILLE_INCONNUE })
   city?: string;
 
   /*
-   * La position est **obligatoire** à la création.
+   * La position de l'adresse est **facultative**.
    *
-   * Elle était facultative, et une adresse sur cinq en base n'en avait
-   * pas. Or c'est elle qui décide de tout : quelle maison sert le
-   * client (la plus proche de chez lui), et où le livreur va — sans
-   * point, il cherche « N'nakaké » dans une application de plans.
-   * Décision du propriétaire, le 11 septembre 2026.
+   * Elle a été obligatoire du 11 au 15 septembre 2026. Le propriétaire
+   * est revenu dessus : un client enregistre son adresse au bureau et
+   * commande le soir de chez lui, à l'autre bout de la ville — la
+   * position qui compte est celle où il **est** au moment de commander.
+   * Elle est donc relevée à la commande ([[CreateOrderDto]]), et c'est
+   * elle qui désigne la maison la plus proche et guide le livreur. Celle
+   * de l'adresse ne sert plus que de repli pour choisir la carte servie
+   * quand le téléphone ne se situe pas.
    */
-  @ApiProperty({ example: 9.509167, description: 'Position GPS de l’adresse. Obligatoire.' })
-  @IsDefined({ message: 'La position GPS de l’adresse est obligatoire.' })
+  @ApiPropertyOptional({
+    example: 9.509167,
+    description:
+      'Position GPS de l’adresse, facultative : la position de livraison est relevée à la commande.',
+  })
+  @IsOptional()
   @Type(() => Number)
   @IsLatitude({ message: 'La latitude n’est pas valide.' })
-  latitude!: number;
+  latitude?: number;
 
-  @ApiProperty({ example: -13.712222 })
-  @IsDefined({ message: 'La position GPS de l’adresse est obligatoire.' })
+  @ApiPropertyOptional({ example: -13.712222 })
+  @IsOptional()
   @Type(() => Number)
   @IsLongitude({ message: 'La longitude n’est pas valide.' })
-  longitude!: number;
+  longitude?: number;
 
   @ApiPropertyOptional({ description: 'Numéro à appeler à la livraison.' })
   @IsOptional()

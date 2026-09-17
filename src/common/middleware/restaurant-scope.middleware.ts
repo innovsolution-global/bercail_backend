@@ -5,6 +5,8 @@ declare module 'express-serve-static-core' {
   interface Request {
     /** Établissement demandé par l'appelant, extrait de l'URL. */
     requestedRestaurantId?: string;
+    /** Position désignée par l'application cliente, extraite de l'URL. */
+    clientPosition?: { latitude: number; longitude: number };
   }
 }
 
@@ -36,19 +38,44 @@ export class RestaurantScopeMiddleware implements NestMiddleware {
 
     const params = new URLSearchParams(search);
     const requested = params.get('restaurantId');
-    if (!requested) return next();
+    const lat = params.get('lat');
+    const lng = params.get('lng');
 
-    request.requestedRestaurantId = requested;
+    if (!requested && lat === null && lng === null) return next();
+
+    if (requested) request.requestedRestaurantId = requested;
+
+    /*
+     * La position de l'application cliente : `lat` et `lng`, tous deux
+     * requis. Une valeur absurde est ignorée, pas refusée — c'est une
+     * indication de confort, et un GPS capricieux ne doit pas casser la
+     * carte. Le repli sur l'adresse du carnet reste alors valable.
+     */
+    if (lat !== null && lng !== null) {
+      const latitude = Number(lat);
+      const longitude = Number(lng);
+      if (
+        Number.isFinite(latitude) &&
+        Number.isFinite(longitude) &&
+        Math.abs(latitude) <= 90 &&
+        Math.abs(longitude) <= 180
+      ) {
+        request.clientPosition = { latitude, longitude };
+      }
+    }
 
     /*
      * On réécrit l'URL, et non `req.query`.
      *
      * Express 5 expose `query` comme un accesseur qui relit la chaîne de
      * requête à chaque lecture : y supprimer une clé n'a donc aucun effet
-     * durable. Retirer le paramètre de l'URL est la seule façon qu'il
-     * disparaisse aussi pour la validation, qui s'exécute plus loin.
+     * durable. Retirer les paramètres de l'URL est la seule façon qu'ils
+     * disparaissent aussi pour la validation, qui s'exécute plus loin et
+     * refuse tout champ inconnu.
      */
     params.delete('restaurantId');
+    params.delete('lat');
+    params.delete('lng');
     const rest = params.toString();
     request.url = rest ? `${path}?${rest}` : path;
 

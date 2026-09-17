@@ -213,7 +213,7 @@ model CustomerProfile {
   userId String @unique
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  loyaltyPoints Int @default(0)
+  loyaltyPoints   Int       @default(0)
   /// Compteurs dénormalisés, maintenus dans les transactions de commande.
   ordersCount     Int       @default(0)
   cancelledOrders Int       @default(0)
@@ -242,13 +242,13 @@ model DriverProfile {
 
   /// Note moyenne, nulle tant que personne n'a noté. Pas de 5 par défaut :
   /// une note inventée se lit comme une note méritée.
-  rating              Float?
-  completedDeliveries Int   @default(0)
-  cancelledDeliveries Int   @default(0)
+  rating               Float?
+  completedDeliveries  Int    @default(0)
+  cancelledDeliveries  Int    @default(0)
   /// Distance cumulée en mètres (entier : pas de flottant sur les compteurs).
-  totalDistanceMeters  Int @default(0)
-  totalDeliveryMinutes Int @default(0)
-  earningsThisMonth    Int @default(0)
+  totalDistanceMeters  Int    @default(0)
+  totalDeliveryMinutes Int    @default(0)
+  earningsThisMonth    Int    @default(0)
 
   lastLatitude   Float?
   lastLongitude  Float?
@@ -269,13 +269,13 @@ model DriverProfile {
 // ───────────────────── Sessions & jetons ──────────────────────────────────
 
 model RefreshToken {
-  id     String @id @default(uuid())
-  userId String
-  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id        String @id @default(uuid())
+  userId    String
+  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   /// SHA-256 du refresh token : le jeton brut n'existe que côté client.
   tokenHash String @unique
   /// Famille de rotation : révoquer la famille invalide toute la lignée.
-  family String
+  family    String
 
   userAgent String?
   ipAddress String?
@@ -407,8 +407,6 @@ model Restaurant {
   reviews      OrderReview[]
 
   staff      User[]
-  categories Category[]
-  menuItems  MenuItem[]
   suppliers  Supplier[]
   stockItems StockItem[]
   movements  StockMovement[]
@@ -416,7 +414,7 @@ model Restaurant {
   expenses   Expense[]
   incomes    Income[]
   employees  Employee[]
-  promotions Promotion[]
+  stockouts  MenuItemStockout[]
 
   @@index([isActive])
   @@map("restaurants")
@@ -427,10 +425,10 @@ model OpeningHour {
   restaurantId String
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
   /// 1 = lundi … 7 = dimanche (ISO-8601).
-  weekday  Int
-  opensAt  String  @default("08:00")
-  closesAt String  @default("23:00")
-  isClosed Boolean @default(false)
+  weekday      Int
+  opensAt      String     @default("08:00")
+  closesAt     String     @default("23:00")
+  isClosed     Boolean    @default(false)
 
   @@unique([restaurantId, weekday])
   @@map("opening_hours")
@@ -466,13 +464,10 @@ model SystemSettings {
 // ───────────────────────────── Carte ──────────────────────────────────────
 
 model Category {
-  id          String  @id @default(uuid())
-  /// Établissement propriétaire de cette donnée.
-  restaurantId String
-  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  id String @id @default(uuid())
 
   name        String
-  slug        String
+  slug        String  @unique
   emoji       String?
   description String?
   imageUrl    String?
@@ -486,40 +481,35 @@ model Category {
   menuItems MenuItem[]
 
   @@index([isActive])
-  @@unique([restaurantId, slug])
-  @@index([restaurantId])
   @@map("categories")
 }
 
 model MenuItem {
-  id         String   @id @default(uuid())
-  /// Établissement propriétaire de cette donnée.
-  restaurantId String
-  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  id String @id @default(uuid())
 
   categoryId String
   category   Category @relation(fields: [categoryId], references: [id])
 
   name             String
-  shortDescription String @default("")
-  description      String @default("")
+  shortDescription String   @default("")
+  description      String   @default("")
   /// Prix en GNF (entier).
-  price       Int
-  promoPrice  Int?
-  imageUrl    String   @default("")
-  ingredients String[] @default([])
+  price            Int
+  promoPrice       Int?
+  imageUrl         String   @default("")
+  ingredients      String[] @default([])
 
   isAvailable  Boolean @default(true)
   isPopular    Boolean @default(false)
   isSuggestion Boolean @default(false)
   isSpicy      Boolean @default(false)
 
-  preparationMinutes Int   @default(20)
+  preparationMinutes Int    @default(20)
   /// Note moyenne, nulle tant qu'aucun avis n'a été laissé.
   rating             Float?
-  reviewCount        Int   @default(0)
+  reviewCount        Int    @default(0)
   /// Compteur de commandes, maintenu à la création de commande.
-  ordersCount Int @default(0)
+  ordersCount        Int    @default(0)
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -531,12 +521,35 @@ model MenuItem {
   orderItems   OrderItem[]
   reviews      OrderItemReview[]
   recipe       RecipeIngredient[]
+  stockouts    MenuItemStockout[]
 
   @@index([categoryId])
   @@index([isAvailable])
   @@index([isPopular])
-  @@index([restaurantId])
   @@map("menu_items")
+}
+
+/// Un plat épuisé dans une maison.
+///
+/// La carte est commune à toutes les maisons ; la rupture ne l'est pas. Une
+/// ligne veut dire « épuisé ici », son absence « disponible ici » — sous
+/// réserve de `MenuItem.isAvailable`, qui retire le plat de toute la carte.
+/// Quand la maison la plus proche d'un client ne peut pas préparer sa
+/// commande, celle-ci part chez la plus proche qui le peut.
+model MenuItemStockout {
+  id String @id @default(uuid())
+
+  menuItemId String
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+
+  restaurantId String
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([menuItemId, restaurantId])
+  @@index([restaurantId])
+  @@map("menu_item_stockouts")
 }
 
 model MenuOptionGroup {
@@ -564,7 +577,7 @@ model MenuOption {
   groupId String
   group   MenuOptionGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
-  name String
+  name        String
   /// Supplément en GNF ; 0 = inclus.
   extraPrice  Int     @default(0)
   isAvailable Boolean @default(true)
@@ -734,12 +747,14 @@ model Order {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  items       OrderItem[]
-  history     OrderStatusHistory[]
-  payment     Payment?
-  delivery    Delivery?
-  couponUsage CouponUsage?
-  review      OrderReview?
+  items          OrderItem[]
+  history        OrderStatusHistory[]
+  payment        Payment?
+  delivery       Delivery?
+  couponUsage    CouponUsage?
+  review         OrderReview?
+  /// Les sorties de stock que cette commande a déclenchées.
+  stockMovements StockMovement[]      @relation("OrderStockMovements")
 
   @@index([customerId])
   @@index([status])
@@ -886,7 +901,7 @@ model Delivery {
   estimatedArrivalAt DateTime?
   assignedById       String?
   /// Nombre de réattributions : sert au suivi qualité et à l'audit.
-  reassignmentCount Int @default(0)
+  reassignmentCount  Int       @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1006,15 +1021,13 @@ model DeliveryVerificationCode {
   deliveryId String   @unique
   delivery   Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
 
-  /*
+  /**
    * Le code, tel que le client doit pouvoir le lire.
-   *
    * Il a longtemps été stocké haché seulement — mais la notification
    * envoyée au client le porte en clair, corps et données comprises, dans
    * cette même base. Le hachage ne protégeait donc rien, et coûtait
    * l'essentiel : le client ne pouvait plus retrouver son code une fois la
    * notification balayée, et la remise restait bloquée.
-   *
    * Il n'est lisible que par le client destinataire. Le livreur ne le
    * reçoit jamais : il saisit ce qu'on lui dit, et le serveur compare.
    */
@@ -1035,10 +1048,7 @@ model DeliveryVerificationCode {
 // ────────────────────── Promotions & coupons ──────────────────────────────
 
 model Promotion {
-  id          String  @id @default(uuid())
-  /// Établissement propriétaire de cette donnée.
-  restaurantId String
-  restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  id String @id @default(uuid())
 
   name        String
   description String?
@@ -1046,7 +1056,7 @@ model Promotion {
   /// Visuel de la carte promotionnelle. Vide : la carte s'affiche sans image.
   imageUrl    String?
 
-  type PromotionType
+  type  PromotionType
   /// Pourcentage (0-100) ou montant fixe en GNF, selon `type`.
   value Int
 
@@ -1069,8 +1079,6 @@ model Promotion {
 
   @@index([isActive])
   @@index([code])
-  @@unique([restaurantId, code])
-  @@index([restaurantId])
   @@map("promotions")
 }
 
@@ -1136,8 +1144,8 @@ model DeviceToken {
 model AuditLog {
   id String @id @default(uuid())
 
-  actorId String?
-  actor   User?   @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  actorId   String?
+  actor     User?   @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
   /// Copie du nom et du rôle : le journal reste lisible même si le
   /// compte est supprimé.
   actorName String
@@ -1328,7 +1336,7 @@ enum OrderChannel {
 }
 
 model Supplier {
-  id          String  @id @default(uuid())
+  id           String     @id @default(uuid())
   /// Établissement propriétaire de cette donnée.
   restaurantId String
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
@@ -1359,7 +1367,7 @@ model Supplier {
 
 /// Un article de stock : poulet, riz, huile, emballages…
 model StockItem {
-  id        String        @id @default(uuid())
+  id           String     @id @default(uuid())
   /// Établissement propriétaire de cette donnée.
   restaurantId String
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
@@ -1370,7 +1378,7 @@ model StockItem {
   unit      StockUnit     @default(KG)
 
   /// Quantité disponible, exprimée dans l'unité de l'article.
-  quantity Float @default(0)
+  quantity    Float @default(0)
   /// Seuil d'alerte : en dessous, l'article remonte en réapprovisionnement.
   minQuantity Float @default(0)
 
@@ -1405,7 +1413,7 @@ model StockItem {
 /// quantityAfter fige l'état après coup — un inventaire reste lisible même
 /// si l'article est modifié ensuite.
 model StockMovement {
-  id          String    @id @default(uuid())
+  id           String     @id @default(uuid())
   /// Établissement propriétaire de cette donnée.
   restaurantId String
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
@@ -1427,6 +1435,11 @@ model StockMovement {
   purchaseId String?
   purchase   Purchase? @relation(fields: [purchaseId], references: [id], onDelete: SetNull)
 
+  /// La commande qui a consommé la matière, pour une sortie de préparation.
+  /// C'est elle qui permet de dire ce qu'un achat a rapporté.
+  orderId String?
+  order   Order?  @relation("OrderStockMovements", fields: [orderId], references: [id], onDelete: SetNull)
+
   createdById String?
   createdBy   User?   @relation("StockMovementAuthor", fields: [createdById], references: [id], onDelete: SetNull)
 
@@ -1437,13 +1450,14 @@ model StockMovement {
   @@index([occurredAt])
   @@index([type])
   @@index([restaurantId])
+  @@index([orderId])
   @@map("stock_movements")
 }
 
 /// Approvisionnement : ce que le restaurant achète à un fournisseur. Un
 /// achat alimente le stock ET crée la dépense correspondante.
 model Purchase {
-  id        String @id @default(uuid())
+  id           String     @id @default(uuid())
   /// Établissement propriétaire de cette donnée.
   restaurantId String
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
@@ -1502,7 +1516,7 @@ model PurchaseItem {
 /// additionnée par le rapport de période, ce qui interdit tout double
 /// comptage.
 model Expense {
-  id        String @id @default(uuid())
+  id           String     @id @default(uuid())
   /// Établissement propriétaire de cette donnée.
   restaurantId String
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
@@ -1558,7 +1572,7 @@ model Expense {
 /// Recette hors vente : location de la salle, remboursement d'un
 /// fournisseur, apport du propriétaire…
 model Income {
-  id        String @id @default(uuid())
+  id           String     @id @default(uuid())
   /// Établissement propriétaire de cette donnée.
   restaurantId String
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
@@ -1589,7 +1603,7 @@ model Income {
 /// Personnel du restaurant. Un employé n'est pas forcément un compte du
 /// système : le cuisinier n'a pas d'accès au back-office.
 model Employee {
-  id        String  @id @default(uuid())
+  id           String     @id @default(uuid())
   /// Établissement propriétaire de cette donnée.
   restaurantId String
   restaurant   Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
@@ -1710,7 +1724,7 @@ model SyncOutbox {
   id String @id @default(uuid())
 
   /// Nœud qui a produit l'écriture.
-  origin SyncNode
+  origin    SyncNode
   /// Nom logique de l'entité : « Order », « StockMovement »…
   entity    String
   entityId  String
@@ -1792,12 +1806,12 @@ model SyncState {
   /// Horodatage de la dernière écriture reçue du pair : point de reprise.
   cursor DateTime?
 
-  lastPushAt   DateTime?
-  lastPullAt   DateTime?
-  lastError    String?
+  lastPushAt  DateTime?
+  lastPullAt  DateTime?
+  lastError   String?
   /// Nombre d'écritures transmises depuis le démarrage, pour la supervision.
-  pushedCount Int @default(0)
-  pulledCount Int @default(0)
+  pushedCount Int       @default(0)
+  pulledCount Int       @default(0)
 
   updatedAt DateTime @updatedAt
 

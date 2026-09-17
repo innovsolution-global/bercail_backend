@@ -53,11 +53,22 @@ export class NotificationsService {
       this.realtime.notificationCreated(input.userId, this.toDto(notification));
 
       if (input.push !== false) {
-        await this.push.sendToUser(input.userId, {
-          title: input.title,
-          body: input.body,
-          data: { ...(input.data ?? {}), type: input.type, entityId: input.entityId ?? '' },
-        });
+        // Sans attendre : l'aller-retour chez Firebase ne doit pas
+        // retarder la commande qui vient d'être passée.
+        void this.push
+          .sendToUser(input.userId, {
+            title: input.title,
+            body: input.body,
+            data: {
+              ...(input.data ?? {}),
+              type: input.type,
+              entityId: input.entityId ?? '',
+              link: input.link ?? '',
+            },
+          })
+          .catch((error: unknown) =>
+            this.logger.warn(`Push non envoyé : ${(error as Error).message}`),
+          );
       }
 
       return notification;
@@ -137,10 +148,18 @@ export class NotificationsService {
     }
 
     if (input.push !== false) {
-      await this.push.sendToUsers(
-        staff.map((member) => member.id),
-        { title: input.title, body: input.body },
-      );
+      void this.push
+        .sendToUsers(
+          staff.map((member) => member.id),
+          {
+            title: input.title,
+            body: input.body,
+            data: { type: input.type, entityId: input.entityId ?? '', link: input.link ?? '' },
+          },
+        )
+        .catch((error: unknown) =>
+          this.logger.warn(`Push non envoyé : ${(error as Error).message}`),
+        );
     }
   }
 

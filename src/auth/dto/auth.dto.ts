@@ -98,10 +98,23 @@ export class ForgotPasswordDto {
 }
 
 export class ResetPasswordDto {
-  @ApiProperty({ description: "Jeton reçu par e-mail ou SMS." })
+  @ApiProperty({ description: 'Le code à six chiffres reçu par e-mail, ou le jeton du lien.' })
   @IsString()
   @IsNotEmpty()
   token!: string;
+
+  /**
+   * L'adresse du compte, quand `token` est le code à six chiffres.
+   *
+   * Un code court ne vaut que pour le compte auquel il a été envoyé : sans
+   * l'adresse, on ne saurait pas à qui le comparer. Le lien du back-office,
+   * lui, porte un jeton long et se passe de l'adresse.
+   */
+  @ApiPropertyOptional({ example: 'mariama.diallo@example.gn' })
+  @IsOptional()
+  @IsString()
+  @Transform(normalizeEmail)
+  email?: string;
 
   @ApiProperty({ minLength: 8 })
   @IsString()

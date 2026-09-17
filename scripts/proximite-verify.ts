@@ -196,7 +196,7 @@ async function main(): Promise<void> {
 
   for (const commande of commandes) {
     const a = commande.address;
-    if (!isValidCoordinates({ latitude: a?.latitude, longitude: a?.longitude })) continue;
+    if (!isValidCoordinates({ latitude: a?.latitude ?? undefined, longitude: a?.longitude ?? undefined })) continue;
 
     const r = plusProche({ latitude: a!.latitude!, longitude: a!.longitude! }, situees);
     const recue = codeParId.get(commande.restaurantId) ?? '?';

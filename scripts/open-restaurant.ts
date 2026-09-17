@@ -3,15 +3,15 @@
  *
  *     npm run restaurant:open -- --code=BRC2 --name="Le Bercail — Kipé"
  *
- * Une adresse qui ouvre ne part pas de rien dans la vraie vie : elle reprend
- * la carte de la maison mère, monte sa propre réserve, recrute son équipe et
+ * Une adresse qui ouvre ne part pas de rien dans la vraie vie : elle sert la
+ * carte de l'enseigne, monte sa propre réserve, recrute son équipe et
  * commence à vendre. Le script fait exactement cela.
  *
- * Ce qui est **copié** depuis l'établissement source : la carte — rubriques,
- * plats, options. Ce qui lui est **propre** : le stock, les fournisseurs, le
- * personnel, les dépenses, les ventes. C'est le partage qu'impose le choix
- * « établissements indépendants » : même offre au départ, comptabilité
- * séparée pour toujours.
+ * La carte n'est **pas copiée** : depuis le 14 septembre 2026 elle est
+ * commune à toutes les maisons. L'établissement source ne prête que ses
+ * réglages de départ (présentation, frais, minimum). Ce qui est **propre** à
+ * la nouvelle maison : le stock, les fournisseurs, le personnel, les
+ * dépenses, les ventes — et ses ruptures.
  *
  * Le script est **additif** : il ne touche à aucune donnée existante.
  */
@@ -31,6 +31,7 @@ import {
 } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { randomInt } from 'node:crypto';
+import { VILLES, VILLE_INCONNUE } from '../src/geo/referentiel';
 
 const prisma = new PrismaClient();
 
@@ -69,6 +70,9 @@ async function main() {
   const code = arg('code').toUpperCase();
   const name = arg('name');
   const city = arg('city', 'Conakry');
+  // La ville suit le référentiel des adresses, comme l'API l'exige :
+  // ce script écrit en base sans passer par elle.
+  if (!VILLES.includes(city)) throw new Error('« ' + city + ' » : ' + VILLE_INCONNUE);
   const district = arg('district', 'Ratoma');
   const address = arg('address', 'Kipé, carrefour Constantin');
   const sourceCode = arg('from', 'BRC');
@@ -110,76 +114,24 @@ async function main() {
     },
   });
 
-  /* ---- La carte, reprise de la maison mère ---- */
-  const sourceCategories = await prisma.category.findMany({
-    where: { restaurantId: source.id, deletedAt: null },
-    orderBy: { sortOrder: 'asc' },
-    include: {
-      menuItems: {
-        where: { deletedAt: null },
-        include: { optionGroups: { include: { options: true } } },
+  /*
+   * ---- La carte : celle de l'enseigne ----
+   *
+   * Rien à recopier : catégories, plats et promotions sont communs à toutes
+   * les maisons. Le script les recopiait encore, et plantait **après** avoir
+   * créé l'établissement — une maison à moitié ouverte. On lit seulement les
+   * plats en vente, pour amorcer les ventes d'exemple.
+   */
+  const newItems = (
+    await prisma.menuItem.findMany({
+      where: {
+        deletedAt: null,
+        isAvailable: true,
+        category: { isActive: true, deletedAt: null },
       },
-    },
-  });
-
-  let copiedItems = 0;
-  const newItems: { id: string; name: string; price: number }[] = [];
-
-  for (const category of sourceCategories) {
-    const created = await prisma.category.create({
-      data: {
-        restaurantId: restaurant.id,
-        name: category.name,
-        slug: category.slug,
-        emoji: category.emoji,
-        description: category.description,
-        sortOrder: category.sortOrder,
-        isActive: category.isActive,
-      },
-    });
-
-    for (const item of category.menuItems) {
-      const copy = await prisma.menuItem.create({
-        data: {
-          restaurantId: restaurant.id,
-          categoryId: created.id,
-          name: item.name,
-          shortDescription: item.shortDescription,
-          description: item.description,
-          // Même carte, mêmes prix au départ : le gérant les ajustera.
-          price: item.price,
-          promoPrice: item.promoPrice,
-          imageUrl: item.imageUrl,
-          ingredients: item.ingredients,
-          isAvailable: item.isAvailable,
-          isPopular: item.isPopular,
-          isSuggestion: item.isSuggestion,
-          isSpicy: item.isSpicy,
-          preparationMinutes: item.preparationMinutes,
-          optionGroups: {
-            create: item.optionGroups.map((group) => ({
-              name: group.name,
-              isRequired: group.isRequired,
-              minSelect: group.minSelect,
-              maxSelect: group.maxSelect,
-              sortOrder: group.sortOrder,
-              options: {
-                create: group.options.map((option) => ({
-                  name: option.name,
-                  extraPrice: option.extraPrice,
-                  isAvailable: option.isAvailable,
-                  sortOrder: option.sortOrder,
-                })),
-              },
-            })),
-          },
-        },
-      });
-
-      copiedItems += 1;
-      newItems.push({ id: copy.id, name: copy.name, price: copy.promoPrice ?? copy.price });
-    }
-  }
+      select: { id: true, name: true, price: true, promoPrice: true },
+    })
+  ).map((item) => ({ id: item.id, name: item.name, price: item.promoPrice ?? item.price }));
 
   /* ---- Ses fournisseurs et sa réserve ---- */
   const suppliers = await Promise.all(
@@ -361,7 +313,8 @@ async function main() {
   let ventes = 0;
   let chiffre = 0;
 
-  for (let index = 0; index < 14; index += 1) {
+  // Sans plat en vente, pas de vente d'exemple : une commande vide fausserait le chiffre.
+  for (let index = 0; newItems.length > 0 && index < 14; index += 1) {
     const quand = daysAgo(randomInt(0, 5), randomInt(11, 21));
     const choisis = [...newItems].sort(() => Math.random() - 0.5).slice(0, randomInt(1, 3));
 
@@ -421,7 +374,7 @@ async function main() {
   const gnf = (value: number) => `${new Intl.NumberFormat('fr-FR').format(value)} GNF`;
 
   console.log(`✅ ${restaurant.name} — code ${restaurant.code}`);
-  console.log(`   carte      : ${sourceCategories.length} rubriques, ${copiedItems} plats repris de ${source.code}`);
+  console.log(`   carte      : commune à l'enseigne, ${newItems.length} plats en vente`);
   console.log(`   réserve    : ${stockItems.length} articles, ${suppliers.length} fournisseurs`);
   console.log(`   achat      : ${gnf(totalAchat)} à l'ouverture`);
   console.log(`   charges    : loyer + électricité (une reste à payer)`);

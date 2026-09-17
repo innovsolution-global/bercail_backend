@@ -34,6 +34,8 @@ export type OrderSummaryRow = Order & {
   delivery?: DeliveryWithDriver | null;
   items?: { quantity: number }[];
   _count?: { items: number };
+  /** L'avis, réduit à son existence : la liste dit « à noter » ou non. */
+  review?: { id: string } | null;
 };
 
 /** Commande complète, telle que chargée pour un détail ou un suivi. */
@@ -127,6 +129,12 @@ export function toOrderSummary(order: OrderSummaryRow) {
     driverName: driverName(order),
     createdAt: order.createdAt.toISOString(),
     /*
+     * Déjà notée ? La liste des commandes passées propose « Noter » sur
+     * celles qui ne le sont pas, et la fiche d'un plat cherche parmi
+     * elles la commande par laquelle le noter.
+     */
+    reviewed: Boolean(order.review),
+    /*
      * Les lignes, en version courte.
      *
      * Le détail en rend bien davantage — prix, options, notes. Ici on
@@ -147,6 +155,16 @@ export function toOrderSummary(order: OrderSummaryRow) {
 export function toOrderDetail(order: OrderWithRelations) {
   return {
     ...toOrderSummary(order),
+    /**
+     * La maison qui prépare.
+     *
+     * Ce n'est plus forcément la plus proche : quand celle-ci n'a plus
+     * l'un des plats, la commande bascule chez une autre — et le client
+     * comme le gérant doivent pouvoir le lire sur la commande elle-même.
+     */
+    restaurant: order.restaurant
+      ? { id: order.restaurant.id, name: order.restaurant.name }
+      : null,
     items: (order.items ?? []).map((item) => ({
       id: item.id,
       menuItemId: item.menuItemId,
@@ -333,4 +351,5 @@ export const ORDER_SUMMARY_INCLUDE = {
   items: {
     select: { quantity: true, name: true, imageUrl: true, menuItemId: true },
   },
+  review: { select: { id: true } },
 } satisfies Prisma.OrderInclude;

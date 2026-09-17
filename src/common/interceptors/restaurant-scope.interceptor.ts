@@ -30,12 +30,28 @@ export class RestaurantScopeInterceptor implements NestInterceptor {
     const request = context.switchToHttp().getRequest<{
       user?: AuthenticatedUser & { restaurantId?: string | null };
       requestedRestaurantId?: string;
+      clientPosition?: { latitude: number; longitude: number };
     }>();
 
     const user = request.user;
+    const position = request.clientPosition ?? null;
 
-    // Route publique : rien à cloisonner, et rien à filtrer non plus.
-    if (!user) return next.handle();
+    /*
+     * Route publique : rien à cloisonner, rien à filtrer.
+     *
+     * Mais si l'application dit où elle est, on le retient : c'est ce qui
+     * permet à un visiteur pas encore inscrit, debout à Kipé, de voir la
+     * carte de Kipé plutôt que celle de la maison la plus ancienne. Sans
+     * position, on ne pose aucun contexte — l'authentification, elle,
+     * doit pouvoir chercher un compte par son e-mail sans périmètre.
+     */
+    if (!user) {
+      if (!position) return next.handle();
+      return restaurantContext.run(
+        { restaurantId: null, unrestricted: true, position },
+        () => next.handle(),
+      );
+    }
 
     if (user.role === Role.SUPER_ADMIN) {
       const chosen = request.requestedRestaurantId;
@@ -80,7 +96,7 @@ export class RestaurantScopeInterceptor implements NestInterceptor {
      */
     if (user.role === Role.CUSTOMER) {
       return restaurantContext.run(
-        { restaurantId: null, unrestricted: true, customerId: user.id },
+        { restaurantId: null, unrestricted: true, customerId: user.id, position },
         () => next.handle(),
       );
     }

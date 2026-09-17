@@ -80,6 +80,16 @@ describe('Routage des clients vers l’établissement le plus proche', () => {
     expect(await router.nearestTo({ latitude: 9.63, longitude: -13.62 })).toBe('kipe');
   });
 
+  it('classe les maisons de la plus proche à la plus lointaine', async () => {
+    // C'est l'ordre dans lequel une commande cherche une cuisine de
+    // secours quand la plus proche n'a plus l'un des plats.
+    const { router } = monter();
+
+    expect(await router.closestFirst({ latitude: 9.63, longitude: -13.62 })).toEqual(['kipe', 'kaloum']);
+    expect(await router.closestFirst({ latitude: 9.51, longitude: -13.71 })).toEqual(['kaloum', 'kipe']);
+    expect(await router.closestFirst({ latitude: Number.NaN, longitude: 0 })).toEqual([]);
+  });
+
   it('ne relit pas la liste des maisons à chaque appel', async () => {
     // Elle est consultée à chaque lecture publique : une requête par
     // appel pour une table de trois lignes serait du gaspillage.
@@ -92,16 +102,4 @@ describe('Routage des clients vers l’établissement le plus proche', () => {
     expect(prisma.restaurant.findMany).toHaveBeenCalledTimes(1);
   });
 
-  it('rend les maisons d’où viennent les plats d’un panier', async () => {
-    // C'est ce qui décide de la cuisine : un plat appartient à une carte,
-    // une carte à une maison. Deux maisons dans un panier, et la commande
-    // est refusée plutôt que répartie au hasard.
-    const { router, prisma } = monter();
-    prisma.menuItem.findMany = jest.fn(async () => [
-      { restaurantId: 'kipe' },
-      { restaurantId: 'kipe' },
-    ]) as never;
-
-    expect(await router.forMenuItems(['p1', 'p2'])).toEqual(['kipe']);
-  });
 });

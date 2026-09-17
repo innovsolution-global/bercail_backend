@@ -63,6 +63,7 @@ export const ENTITY_OWNERSHIP: Readonly<Record<string, Ownership>> = {
   Category: SyncNode.LOCAL,
   MenuOptionGroup: SyncNode.LOCAL,
   MenuOption: SyncNode.LOCAL,
+  MenuItemStockout: SyncNode.LOCAL,
   RecipeIngredient: SyncNode.LOCAL,
   StockItem: SyncNode.LOCAL,
   StockMovement: SyncNode.LOCAL,
@@ -112,6 +113,7 @@ export const ENTITY_MODELS: Readonly<Record<string, string>> = {
   Category: 'category',
   MenuOptionGroup: 'menuOptionGroup',
   MenuOption: 'menuOption',
+  MenuItemStockout: 'menuItemStockout',
   RecipeIngredient: 'recipeIngredient',
   StockItem: 'stockItem',
   StockMovement: 'stockMovement',
@@ -186,6 +188,7 @@ const ENTITY_RANK: Readonly<Record<string, number>> = {
   Address: 1,
 
   MenuOptionGroup: 2,
+  MenuItemStockout: 2,
   Purchase: 2,
   Order: 2,
 

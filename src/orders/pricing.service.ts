@@ -50,6 +50,15 @@ export interface QuoteInput {
   orderType: OrderType;
   promotionCode?: string | null;
   customerId?: string;
+  /**
+   * La maison qui préparera et livrera : ce sont **ses** frais, **son**
+   * minimum et **son** temps de préparation qui s'appliquent.
+   *
+   * La carte étant commune, les plats ne désignent plus de cuisine : c'est
+   * l'appelant qui la choisit — la plus proche de l'adresse livrée, à la
+   * création d'une commande. Absente, c'est la maison qui sert la requête.
+   */
+  restaurantId?: string;
 }
 
 /**
@@ -81,35 +90,11 @@ export class PricingService {
       include: { optionGroups: { include: { options: true } } },
     });
 
-    /*
-     * **La maison dont on applique les frais est celle des plats.**
-     *
-     * Le devis chiffrait chez la maison du contexte — celle qui sert la
-     * carte au client au moment de l'appel. Or un panier se remplit
-     * avant de se payer : entre les deux, le client peut enregistrer une
-     * adresse plus proche d'une autre maison, et sa carte change sous
-     * ses pieds. Son panier, lui, contient toujours les plats de la
-     * première ; chiffrés chez la seconde, ils étaient « introuvables »,
-     * et l'écran du panier tombait en erreur sans qu'on puisse même le
-     * vider.
-     *
-     * Les plats désignent donc leur cuisine, et c'est **ses** frais,
-     * **son** minimum et **son** temps de préparation qui s'appliquent.
-     * Deux cuisines dans un même devis sont refusées : on ne facture pas
-     * un plat de Kipé au tarif de livraison de Kaloum.
-     */
-    const cuisines = [...new Set(items.map((item) => item.restaurantId))];
-    if (cuisines.length > 1) {
-      throw AppException.badRequest(
-        ERROR_CODES.VALIDATION_ERROR,
-        'Votre panier contient des plats de deux établissements différents. ' +
-          'Videz-le et recommencez pour commander dans un seul.',
-      );
-    }
-    const restaurant =
-      cuisines.length === 1
-        ? await this.settings.byId(cuisines[0])
-        : await this.settings.getRestaurantCached();
+    // La carte est commune : la maison vient de l'appelant, sinon de la
+    // requête. Un panier ne peut plus mélanger deux cuisines.
+    const restaurant = input.restaurantId
+      ? await this.settings.byId(input.restaurantId)
+      : await this.settings.getRestaurantCached();
 
     const itemById = new Map(items.map((item) => [item.id, item]));
     const lines: PricedLine[] = [];
@@ -175,7 +160,6 @@ export class PricingService {
       input.promotionCode ?? null,
       subtotal,
       deliveryFee,
-      restaurant.id,
       input.customerId,
     );
 
@@ -257,13 +241,9 @@ export class PricingService {
     for (const group of item.optionGroups) {
       const count = countByGroup.get(group.id) ?? 0;
 
-      if (group.isRequired && count < Math.max(1, group.minSelect)) {
-        throw AppException.badRequest(
-          ERROR_CODES.OPTION_GROUP_REQUIRED,
-          `Choisissez « ${group.name} » pour « ${item.name} ».`,
-        );
-      }
-
+      // Un accompagnement est **toujours facultatif** : décision du
+      // propriétaire. Le client peut commander le plat seul ; les règles
+      // de minimum et de maximum ne s'appliquent que s'il choisit.
       if (count > 0 && count < group.minSelect) {
         throw AppException.badRequest(
           ERROR_CODES.MENU_OPTION_INVALID,
@@ -295,17 +275,13 @@ export class PricingService {
     code: string | null,
     subtotal: number,
     deliveryFee: number,
-    restaurantId: string,
     customerId?: string,
   ): Promise<{ discount: number; promotion: PriceQuote['promotion'] }> {
     if (!code) return { discount: 0, promotion: null };
 
     const promotion = await client.promotion.findFirst({
-      // Une remise est offerte par une maison, sur ses propres marges :
-      // un code de la seconde adresse ne doit pas entamer la recette de
-      // la première. Le client n'appartenant à aucun établissement, rien
-      // ne posait ce filtre pour lui.
-      where: { code: code.trim().toUpperCase(), restaurantId, deletedAt: null },
+      // Les promotions sont communes à toutes les maisons, comme la carte.
+      where: { code: code.trim().toUpperCase(), deletedAt: null },
     });
 
     if (!promotion || !promotion.isActive) {

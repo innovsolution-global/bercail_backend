@@ -86,6 +86,28 @@ export class RestaurantRouter {
     return maisons[0]?.id ?? null;
   }
 
+  /** Toutes les maisons ouvertes au public, de la plus ancienne à la plus récente. */
+  async activeIds(): Promise<string[]> {
+    return (await this.open()).map((maison) => maison.id);
+  }
+
+  /**
+   * Les maisons situables, de la plus proche à la plus lointaine d'un point.
+   *
+   * C'est l'ordre dans lequel une commande cherche une cuisine de secours
+   * quand la plus proche n'a plus l'un des plats : voir [[KitchenSelector]].
+   * Vide si le point est inutilisable.
+   */
+  async closestFirst(position: Coordinates): Promise<string[]> {
+    if (!isValidCoordinates(position)) return [];
+
+    return (await this.open())
+      .filter((m) => isValidCoordinates({ latitude: m.latitude, longitude: m.longitude }))
+      .map((maison) => ({ id: maison.id, distance: distanceMeters(position, maison) }))
+      .sort((left, right) => left.distance - right.distance)
+      .map((maison) => maison.id);
+  }
+
   /**
    * La maison la plus proche d'un point.
    *
@@ -148,24 +170,4 @@ export class RestaurantRouter {
     return this.nearestTo({ latitude: adresse.latitude, longitude: adresse.longitude });
   }
 
-  /**
-   * La maison à qui appartient une commande, d'après ses plats.
-   *
-   * Un plat appartient à une carte, une carte à une maison : c'est donc
-   * le panier qui désigne la cuisine, et non l'adresse de livraison. Un
-   * client commande **chez** quelqu'un, puis se fait livrer où il veut.
-   *
-   * Lève si le panier mélange deux maisons — ce qui n'arrive que si la
-   * carte a changé sous les pieds du client, panier déjà rempli.
-   */
-  async forMenuItems(menuItemIds: string[]): Promise<string[]> {
-    if (menuItemIds.length === 0) return [];
-
-    const plats = await this.prisma.menuItem.findMany({
-      where: { id: { in: menuItemIds } },
-      select: { restaurantId: true },
-    });
-
-    return [...new Set(plats.map((plat) => plat.restaurantId))];
-  }
 }

@@ -38,26 +38,20 @@ export class CategoriesService {
   }
 
   /**
-   * @param publicOnly Lecture faite pour un client, et non pour le
-   *   back-office : elle est alors ramenée à l'établissement servi au
-   *   public. Les comptes du back-office, eux, sont déjà cloisonnés par
-   *   le client Prisma — un ADMIN chez lui, le propriétaire partout.
+   * La carte est **commune à toutes les maisons** : le client et le
+   * back-office lisent les mêmes catégories, d'où une seule clé de cache.
+   *
+   * @param _publicOnly Conservé pour les appelants ; il ne change plus le
+   *   périmètre depuis que la carte n'appartient à aucun établissement.
    */
-  async list(includeInactive = false, publicOnly = false) {
-    const restaurantId = publicOnly ? await this.scope.publicRestaurantId() : null;
-
-    // L'établissement entre dans la clé : sans lui, la première lecture
-    // servirait sa carte à tout le monde, y compris à l'autre maison.
-    const cacheKey = `${CACHE_PREFIX}:${includeInactive ? 'all' : 'active'}:${
-      restaurantId ?? 'portee-du-compte'
-    }`;
+  async list(includeInactive = false, _publicOnly = false) {
+    const cacheKey = `${CACHE_PREFIX}:${includeInactive ? 'all' : 'active'}`;
 
     return this.redis.remember(cacheKey, this.ttl, async () => {
       const categories = await this.prisma.category.findMany({
         where: {
           deletedAt: null,
           ...(includeInactive ? {} : { isActive: true }),
-          ...(restaurantId ? { restaurantId } : {}),
         },
         include: {
           _count: {
@@ -71,17 +65,12 @@ export class CategoriesService {
     });
   }
 
-  async findOne(id: string, publicOnly = false) {
-    // Le slug n'est unique que **par établissement** : sans cette
-    // restriction, « grillades » désignerait la catégorie de la
-    // première maison venue.
-    const restaurantId = publicOnly ? await this.scope.publicRestaurantId() : null;
-
+  async findOne(id: string, _publicOnly = false) {
+    // Le slug est unique pour toute l'enseigne : une seule « grillades ».
     const category = await this.prisma.category.findFirst({
       where: {
         OR: [{ id }, { slug: id }],
         deletedAt: null,
-        ...(restaurantId ? { restaurantId } : {}),
       },
       include: { _count: { select: { menuItems: { where: { deletedAt: null } } } } },
     });
@@ -95,7 +84,6 @@ export class CategoriesService {
 
     const category = await this.prisma.category.create({
       data: {
-        restaurantId: this.scope.resolve(dto.restaurantId),
         name: dto.name,
         slug,
         emoji: dto.emoji,

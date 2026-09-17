@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
-import { Transform } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsEmail,
   IsIn,
@@ -9,8 +11,35 @@ import {
   IsString,
   IsUUID,
   MaxLength,
+  ValidateNested,
 } from 'class-validator';
 import { PaginationQueryDto } from '../../common/dto/pagination.dto';
+import { STOCK_CATEGORIES_WIRE, STOCK_UNITS_WIRE } from './common.dto';
+
+/**
+ * Un article que le fournisseur livre.
+ *
+ * Il entre dans le stock de la maison, rattaché au fournisseur, pour
+ * qu'un achat puisse le choisir. Le propriétaire écrivait ses articles
+ * dans « Spécialité », un simple texte — et ne retrouvait rien à l'achat.
+ */
+export class SupplierItemDto {
+  @ApiProperty({ example: 'Pomme' })
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(120)
+  name!: string;
+
+  @ApiPropertyOptional({ enum: STOCK_CATEGORIES_WIRE, default: 'autre' })
+  @IsOptional()
+  @IsIn(STOCK_CATEGORIES_WIRE)
+  category?: (typeof STOCK_CATEGORIES_WIRE)[number];
+
+  @ApiPropertyOptional({ enum: STOCK_UNITS_WIRE, default: 'kg' })
+  @IsOptional()
+  @IsIn(STOCK_UNITS_WIRE)
+  unit?: (typeof STOCK_UNITS_WIRE)[number];
+}
 
 export class CreateSupplierDto {
   @ApiPropertyOptional({
@@ -68,6 +97,19 @@ export class CreateSupplierDto {
   @IsBoolean()
   @Transform(({ value }) => value === true || value === 'true')
   isActive?: boolean;
+
+  /**
+   * Les articles qu'il livre, à créer dans le stock avec le fournisseur.
+   * À la modification, ce sont des articles **en plus** : ceux déjà en
+   * stock se gèrent sur la page Stock.
+   */
+  @ApiPropertyOptional({ type: [SupplierItemDto] })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @ValidateNested({ each: true })
+  @Type(() => SupplierItemDto)
+  items?: SupplierItemDto[];
 }
 
 /** Tous les champs deviennent facultatifs : on corrige ce qu'on veut. */

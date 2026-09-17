@@ -1,12 +1,33 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, StockMovementReason, StockMovementType } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import { restaurantContext } from '../common/context/restaurant-context';
 import { AppException, ERROR_CODES } from '../common/exceptions/app.exception';
 import type { AuthenticatedUser, RequestContext } from '../common/types/authenticated-user';
 import { toWire } from '../common/utils/wire-enum.util';
 import { PrismaService } from '../database/prisma.service';
 import type { SaveRecipeDto } from './dto/recipe.dto';
 import { StockService } from './stock.service';
+
+/**
+ * La maison dont on lit ou saisit la fiche technique.
+ *
+ * La carte est commune, mais chaque maison a **son** stock : un même plat a
+ * donc une fiche par maison, chaque ligne pointant vers un article de la
+ * réserve de cette maison. Sans maison désignée — le propriétaire en vue
+ * d'ensemble —, il n'y a pas de fiche à montrer : additionner les deux
+ * réserves doublerait le coût de revient.
+ */
+function maisonExigee(): string {
+  const restaurantId = restaurantContext.activeRestaurantId();
+  if (!restaurantId) {
+    throw AppException.badRequest(
+      ERROR_CODES.VALIDATION_ERROR,
+      'Choisissez un établissement en haut de la page : chaque maison a sa propre fiche technique, faite de son stock.',
+    );
+  }
+  return restaurantId;
+}
 
 const RECIPE_INCLUDE = {
   stockItem: {
@@ -54,9 +75,10 @@ export class RecipesService {
       select: { id: true, name: true, price: true, promoPrice: true },
     });
     if (!menuItem) throw AppException.notFound('Plat introuvable.');
+    const restaurantId = maisonExigee();
 
     const lines = await this.prisma.recipeIngredient.findMany({
-      where: { menuItemId },
+      where: { menuItemId, stockItem: { restaurantId } },
       include: RECIPE_INCLUDE,
       orderBy: { stockItem: { name: 'asc' } },
     });
@@ -73,8 +95,13 @@ export class RecipesService {
   async costsFor(menuItemIds: string[]): Promise<Map<string, number>> {
     if (menuItemIds.length === 0) return new Map();
 
+    // En vue d'ensemble, pas de marge : additionner les fiches des deux
+    // maisons compterait deux fois la matière d'un même plat.
+    const restaurantId = restaurantContext.activeRestaurantId();
+    if (!restaurantId) return new Map();
+
     const lines = await this.prisma.recipeIngredient.findMany({
-      where: { menuItemId: { in: menuItemIds } },
+      where: { menuItemId: { in: menuItemIds }, stockItem: { restaurantId } },
       include: RECIPE_INCLUDE,
     });
 
@@ -108,6 +135,7 @@ export class RecipesService {
       select: { id: true, name: true, price: true, promoPrice: true },
     });
     if (!menuItem) throw AppException.notFound('Plat introuvable.');
+    const restaurantId = maisonExigee();
 
     // Deux fois le même article dans la fiche est une erreur de saisie :
     // le dire vaut mieux que d'en garder silencieusement un seul.
@@ -124,8 +152,9 @@ export class RecipesService {
     }
 
     if (dto.ingredients.length > 0) {
+      // Seuls les articles du stock de cette maison sont admis.
       const known = await this.prisma.stockItem.count({
-        where: { id: { in: [...seen] }, deletedAt: null },
+        where: { id: { in: [...seen] }, deletedAt: null, restaurantId },
       });
       if (known !== seen.size) {
         throw AppException.badRequest(
@@ -136,7 +165,9 @@ export class RecipesService {
     }
 
     const lines = await this.prisma.transaction(async (tx) => {
-      await tx.recipeIngredient.deleteMany({ where: { menuItemId } });
+      // On ne remplace que la fiche de cette maison : celle de l'autre,
+      // faite de son propre stock, ne doit pas disparaître.
+      await tx.recipeIngredient.deleteMany({ where: { menuItemId, stockItem: { restaurantId } } });
 
       if (dto.ingredients.length > 0) {
         await tx.recipeIngredient.createMany({
@@ -150,7 +181,7 @@ export class RecipesService {
       }
 
       return tx.recipeIngredient.findMany({
-        where: { menuItemId },
+        where: { menuItemId, stockItem: { restaurantId } },
         include: RECIPE_INCLUDE,
         orderBy: { stockItem: { name: 'asc' } },
       });
@@ -204,6 +235,7 @@ export class RecipesService {
           select: {
             id: true,
             reference: true,
+            restaurantId: true,
             stockConsumedAt: true,
             items: { select: { menuItemId: true, quantity: true } },
           },
@@ -211,7 +243,8 @@ export class RecipesService {
 
         if (!order || order.stockConsumedAt) return;
 
-        const consumptions = await this.resolveConsumptions(tx, order.items);
+        // La maison qui a préparé : c'est de sa réserve que sort la matière.
+        const consumptions = await this.resolveConsumptions(tx, order.items, order.restaurantId);
 
         // On marque d'abord : si une écriture échoue ensuite, on préfère
         // une déduction incomplète à une double déduction au prochain
@@ -228,6 +261,9 @@ export class RecipesService {
             reason: StockMovementReason.PREPARATION,
             quantity: consumption.quantity,
             note: `Préparation ${order.reference}`,
+            // La clé, et pas seulement la référence dans le texte : c'est
+            // par elle qu'on retrouve ce qu'un achat a rapporté.
+            orderId: order.id,
             createdById: actorId,
             allowNegative: true,
           });
@@ -249,6 +285,7 @@ export class RecipesService {
   private async resolveConsumptions(
     tx: Prisma.TransactionClient,
     items: { menuItemId: string | null; quantity: number }[],
+    restaurantId: string,
   ): Promise<Consumption[]> {
     const menuItemIds = [
       ...new Set(items.map((item) => item.menuItemId).filter((id): id is string => Boolean(id))),
@@ -256,7 +293,7 @@ export class RecipesService {
     if (menuItemIds.length === 0) return [];
 
     const recipes = await tx.recipeIngredient.findMany({
-      where: { menuItemId: { in: menuItemIds } },
+      where: { menuItemId: { in: menuItemIds }, stockItem: { restaurantId } },
       include: { stockItem: { select: { id: true, name: true } } },
     });
     if (recipes.length === 0) return [];

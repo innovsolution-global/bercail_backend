@@ -282,6 +282,19 @@ export class PurchasesController {
     return this.purchases.findOne(id);
   }
 
+  @Get(':id/outcome')
+  @RequirePermissions('STOCK_READ')
+  @ApiEndpoint({
+    summary: 'Ce qu’un achat a rapporté',
+    description:
+      'Suit chaque ligne dans le stock jusqu’à son épuisement : quantité consommée, restante, commandes servies avec cette marchandise, ventes et coût matière de ces commandes.',
+    roles: [...BACK_OFFICE],
+    permissions: ['STOCK_READ'],
+  })
+  outcome(@Param('id') id: string) {
+    return this.purchases.outcome(id);
+  }
+
   @Post()
   @RequirePermissions('PURCHASES_MANAGE')
   @ApiEndpoint({

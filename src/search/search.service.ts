@@ -1,9 +1,12 @@
 import { Injectable } from '@nestjs/common';
-import { OrderStatus, Role } from '@prisma/client';
+import { OrderStatus, Prisma, Role } from '@prisma/client';
+import { DishAvailabilityService } from '../common/context/dish-availability.service';
+import { restaurantContext } from '../common/context/restaurant-context';
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { toWire } from '../common/utils/wire-enum.util';
 import { PrismaService } from '../database/prisma.service';
 import { DELIVERY_ACTIVE } from '../deliveries/delivery-status';
+import { UNPAID_ONLINE } from '../orders/unpaid-orders';
 
 /**
  * Recherche globale.
@@ -18,7 +21,10 @@ import { DELIVERY_ACTIVE } from '../deliveries/delivery-status';
  */
 @Injectable()
 export class SearchService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly availability: DishAvailabilityService,
+  ) {}
 
   async search(user: AuthenticatedUser, term: string) {
     const query = term.trim();
@@ -37,11 +43,16 @@ export class SearchService {
   }
 
   private async searchForCustomer(userId: string, query: string) {
+    // Comme la carte : un plat épuisé dans une seule maison se trouve
+    // encore, il n'en sort que lorsqu'aucune ne peut le préparer.
+    const epuisesPartout = await this.availability.soldOutEverywhere();
+
     const [menuItems, orders] = await Promise.all([
       this.prisma.menuItem.findMany({
         where: {
           deletedAt: null,
           isAvailable: true,
+          ...(epuisesPartout.length > 0 ? { id: { notIn: epuisesPartout } } : {}),
           category: { isActive: true },
           OR: [
             { name: { contains: query, mode: 'insensitive' } },
@@ -194,10 +205,18 @@ export class SearchService {
 
   /** Compteurs rapides pour la barre supérieure du back-office. */
   async quickCounts() {
+    // Dans une maison, ses ruptures comptent aussi ; en vue d'ensemble,
+    // seuls les plats retirés de la carte.
+    const maison = restaurantContext.activeRestaurantId();
+    const indisponible: Prisma.MenuItemWhereInput = maison
+      ? { OR: [{ isAvailable: false }, { stockouts: { some: { restaurantId: maison } } }] }
+      : { isAvailable: false };
+
     const [pendingOrders, activeDeliveries, unavailableItems] = await Promise.all([
-      this.prisma.order.count({ where: { status: OrderStatus.PENDING, deletedAt: null } }),
+      // Le badge « en attente » ne compte pas les paiements jamais aboutis.
+      this.prisma.order.count({ where: { status: OrderStatus.PENDING, deletedAt: null, NOT: UNPAID_ONLINE } }),
       this.prisma.delivery.count({ where: { status: { in: DELIVERY_ACTIVE } } }),
-      this.prisma.menuItem.count({ where: { isAvailable: false, deletedAt: null } }),
+      this.prisma.menuItem.count({ where: { deletedAt: null, ...indisponible } }),
     ]);
 
     return { pendingOrders, activeDeliveries, unavailableItems };

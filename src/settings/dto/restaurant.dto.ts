@@ -1,8 +1,11 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsEmail,
+  IsIn,
   IsInt,
   IsLatitude,
   IsLongitude,
@@ -13,6 +16,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { VILLES, VILLE_INCONNUE } from '../../geo/referentiel';
 
 export class CreateRestaurantDto {
   @ApiProperty({
@@ -66,10 +70,11 @@ export class CreateRestaurantDto {
   @MaxLength(120)
   district?: string;
 
-  @ApiPropertyOptional({ example: 'Conakry' })
+  /** Conakry, ou l'une des préfectures de Guinée — voir [[REGIONS]]. */
+  @ApiPropertyOptional({ example: 'Conakry', enum: VILLES })
   @IsOptional()
   @IsString()
-  @MaxLength(120)
+  @IsIn(VILLES, { message: VILLE_INCONNUE })
   city?: string;
 
   @ApiProperty({ example: 9.6412 })
@@ -101,6 +106,21 @@ export class CreateRestaurantDto {
   @IsBoolean()
   @Transform(({ value }) => value === true || value === 'true')
   isOpen?: boolean;
+
+  /**
+   * Les quartiers que la maison livre.
+   *
+   * Demandés dès l'ouverture : ce sont eux que le formulaire « Nouveau
+   * livreur » propose. Une maison ouverte sans zone ne pouvait recevoir
+   * aucun livreur.
+   */
+  @ApiPropertyOptional({ type: [String], example: ['Lambanyi', 'Sonfonia'] })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(40)
+  @IsString({ each: true })
+  @MaxLength(60, { each: true })
+  deliveryZones?: string[];
 }
 
 /** Tous les champs deviennent facultatifs, plus l'activité de l'adresse. */

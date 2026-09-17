@@ -4,6 +4,7 @@ import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../database/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { ORDER_SUMMARY_INCLUDE, toOrderSummary } from '../orders/order.mapper';
+import { UNPAID_ONLINE } from '../orders/unpaid-orders';
 import { ReportsService } from './reports.service';
 
 /**
@@ -46,7 +47,9 @@ export class DashboardService {
       this.reports.totals(previous.from, previous.to),
       this.reports.series(range),
       this.prisma.order.findMany({
-        where: { deletedAt: null },
+        // Une commande en ligne jamais payée n'est pas une commande pour
+        // le restaurant : elle n'a rien à faire dans « dernières commandes ».
+        where: { deletedAt: null, NOT: UNPAID_ONLINE },
         include: ORDER_SUMMARY_INCLUDE,
         orderBy: { createdAt: 'desc' },
         take: 10,
@@ -156,6 +159,7 @@ export class DashboardService {
       by: ['status'],
       where: {
         deletedAt: null,
+        NOT: UNPAID_ONLINE,
         status: {
           in: [
             OrderStatus.PENDING,

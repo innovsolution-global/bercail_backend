@@ -21,11 +21,9 @@ import { formatAmount } from '../common/utils/money.util';
 import { parseEnum, toWire } from '../common/utils/wire-enum.util';
 import { PrismaService } from '../database/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { ABANDON_REASON, cancelledForNonPayment } from '../orders/unpaid-orders';
 import { RealtimeService } from '../realtime/realtime.service';
 import type { InitiatePaymentDto, PaymentQueryDto, RefundPaymentDto } from './dto/payment.dto';
-
-/** Motif inscrit au journal quand le client referme la page de paiement. */
-const ABANDON_REASON = 'Paiement abandonné par le client';
 
 type PaymentRow = Payment & {
   order?: { id: string; reference: string; status: OrderStatus } | null;
@@ -361,7 +359,7 @@ export class PaymentsService {
       throw AppException.forbidden(ERROR_CODES.FORBIDDEN, "Vous n'avez pas accès à ce paiement.");
     }
 
-    const updated = await this.prisma.transaction(async (tx) => {
+    const { updated, resteAnnulee } = await this.prisma.transaction(async (tx) => {
       const result = await tx.payment.update({
         where: { id: paymentId },
         data: {
@@ -377,12 +375,81 @@ export class PaymentsService {
         },
       });
 
-      await tx.order.update({
+      /*
+       * **L'argent arrivé après la fermeture.**
+       *
+       * Fermer la page une seconde avant de valider sur son téléphone est
+       * un geste ordinaire : la commande a été annulée, puis l'opérateur
+       * annonce le paiement. Le client a payé, il attend son repas — la
+       * commande est rétablie, avec ce que l'annulation lui avait rendu.
+       *
+       * Si c'est le restaurant qui l'a annulée, elle reste annulée : on
+       * ne relance pas une cuisine qui a dit non. L'argent devra être
+       * rendu, et le back-office en est prévenu plus bas.
+       */
+      const commande = await tx.order.findUnique({
         where: { id: payment.orderId },
-        data: { paymentStatus: PaymentStatus.PAID },
+        select: {
+          status: true,
+          cancellationReason: true,
+          customerId: true,
+          promotionId: true,
+          discount: true,
+        },
       });
 
-      return result;
+      const annulee = commande?.status === OrderStatus.CANCELLED;
+      const retablir = annulee && cancelledForNonPayment(commande.cancellationReason);
+
+      if (commande && retablir) {
+        await tx.order.update({
+          where: { id: payment.orderId },
+          data: {
+            paymentStatus: PaymentStatus.PAID,
+            status: OrderStatus.PENDING,
+            cancelledAt: null,
+            cancellationReason: null,
+          },
+        });
+        await tx.orderStatusHistory.create({
+          data: {
+            orderId: payment.orderId,
+            status: OrderStatus.PENDING,
+            comment: 'Paiement reçu après la fermeture : commande rétablie',
+          },
+        });
+        if (commande.promotionId) {
+          await tx.promotion.update({
+            where: { id: commande.promotionId },
+            data: { usageCount: { increment: 1 } },
+          });
+          if (commande.customerId) {
+            await tx.couponUsage.upsert({
+              where: { orderId: payment.orderId },
+              update: {},
+              create: {
+                promotionId: commande.promotionId,
+                userId: commande.customerId,
+                orderId: payment.orderId,
+                discountAmount: commande.discount,
+              },
+            });
+          }
+        }
+        if (commande.customerId) {
+          await tx.customerProfile.updateMany({
+            where: { userId: commande.customerId },
+            data: { cancelledOrders: { decrement: 1 }, ordersCount: { increment: 1 } },
+          });
+        }
+      } else {
+        await tx.order.update({
+          where: { id: payment.orderId },
+          data: { paymentStatus: PaymentStatus.PAID },
+        });
+      }
+
+      return { updated: result, resteAnnulee: annulee && !retablir };
     });
 
     this.realtime.paymentUpdated({
@@ -413,7 +480,27 @@ export class PaymentsService {
       context,
     });
 
-    await this.announceToKitchen(payment.orderId);
+    if (resteAnnulee) {
+      // Encaissé sur une commande que le restaurant a annulée : elle ne
+      // part pas en cuisine, mais sans cette alerte personne ne rembourse.
+      try {
+        await this.notifications.notifyBackOffice(
+          {
+            type: NotificationType.ADMIN_ALERT,
+            title: 'Paiement reçu sur une commande annulée',
+            body: `${formatAmount(payment.amount)} encaissés pour ${payment.order.reference}, annulée entre-temps : à rembourser.`,
+            entityId: payment.orderId,
+          },
+          payment.order.restaurantId,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `Alerte de remboursement non envoyée pour ${payment.order.reference} : ${String(error)}`,
+        );
+      }
+    } else {
+      await this.announceToKitchen(payment.orderId);
+    }
 
     return this.toDto(updated);
   }
@@ -538,10 +625,52 @@ export class PaymentsService {
         },
       });
 
-      await tx.order.update({
+      /*
+       * **Annuler le paiement annule la commande.**
+       *
+       * Elle restait « en attente » avec un paiement échoué : le
+       * back-office la voyait comme une commande ordinaire, et un gérant
+       * a pu la confirmer et l'envoyer en cuisine sans qu'un franc soit
+       * encaissé. La croix de la page de paiement est un renoncement :
+       * la commande n'aura pas lieu, et ce qu'elle retenait est rendu.
+       */
+      const commande = await tx.order.findUnique({
         where: { id: payment.orderId },
-        data: { paymentStatus: PaymentStatus.FAILED },
+        select: { status: true, promotionId: true, customerId: true },
       });
+
+      if (commande?.status === OrderStatus.PENDING) {
+        await tx.order.update({
+          where: { id: payment.orderId },
+          data: {
+            paymentStatus: PaymentStatus.FAILED,
+            status: OrderStatus.CANCELLED,
+            cancelledAt: new Date(),
+            cancellationReason: ABANDON_REASON,
+          },
+        });
+        await tx.orderStatusHistory.create({
+          data: { orderId: payment.orderId, status: OrderStatus.CANCELLED, comment: ABANDON_REASON },
+        });
+        if (commande.promotionId) {
+          await tx.promotion.update({
+            where: { id: commande.promotionId },
+            data: { usageCount: { decrement: 1 } },
+          });
+          await tx.couponUsage.deleteMany({ where: { orderId: payment.orderId } });
+        }
+        if (commande.customerId) {
+          await tx.customerProfile.updateMany({
+            where: { userId: commande.customerId },
+            data: { cancelledOrders: { increment: 1 }, ordersCount: { decrement: 1 } },
+          });
+        }
+      } else {
+        await tx.order.update({
+          where: { id: payment.orderId },
+          data: { paymentStatus: PaymentStatus.FAILED },
+        });
+      }
 
       return result;
     });

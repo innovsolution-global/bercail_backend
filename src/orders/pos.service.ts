@@ -9,6 +9,7 @@ import {
   Prisma,
 } from '@prisma/client';
 import { AuditService } from '../audit/audit.service';
+import { DishAvailabilityService } from '../common/context/dish-availability.service';
 import { AppException, ERROR_CODES } from '../common/exceptions/app.exception';
 import type { AuthenticatedUser, RequestContext } from '../common/types/authenticated-user';
 import { generateOrderReference, generateTransactionRef } from '../common/utils/reference.util';
@@ -18,6 +19,7 @@ import { RealtimeService } from '../realtime/realtime.service';
 import { SettingsService } from '../settings/settings.service';
 import { RecipesService } from '../finance/recipes.service';
 import type { CreatePosOrderDto, QuotePosOrderDto } from './dto/pos.dto';
+import { describeSoldOut } from './kitchen-selector.service';
 import { ORDER_DETAIL_INCLUDE, toOrderDetail, toOrderSummary } from './order.mapper';
 import { PricingService, type LineInput } from './pricing.service';
 
@@ -47,13 +49,42 @@ export class PosService {
     private readonly audit: AuditService,
     private readonly recipes: RecipesService,
     private readonly config: ConfigService,
+    private readonly availability: DishAvailabilityService,
   ) {}
+
+  /**
+   * Un plat épuisé ici ne se vend pas ici.
+   *
+   * La rupture est propre à chaque maison, et une commande de
+   * l'application bascule chez une autre quand la plus proche n'a plus
+   * un plat. Pas au comptoir : le client est devant cette cuisine-là.
+   * Le moteur de prix ne connaît que l'interrupteur de l'enseigne, d'où
+   * ce contrôle ici.
+   */
+  private async assertNothingSoldOut(restaurantId: string, lines: LineInput[]): Promise<void> {
+    const epuises = await this.availability.soldOutAt(
+      restaurantId,
+      lines.map((line) => line.menuItemId),
+    );
+    if (epuises.length === 0) return;
+
+    throw AppException.conflict(
+      ERROR_CODES.MENU_ITEM_UNAVAILABLE,
+      `${describeSoldOut(epuises)} dans cet établissement.`,
+      { menuItemIds: epuises.map((dish) => dish.id), restaurantId },
+    );
+  }
 
   /** Aperçu du ticket : ce que la caisse affiche avant d'encaisser. */
   async quote(dto: QuotePosOrderDto) {
+    const restaurant = await this.settings.getRestaurantCached();
+    const lines = this.toLines(dto.items);
+    await this.assertNothingSoldOut(restaurant.id, lines);
+
     const quote = await this.pricing.quote({
-      lines: this.toLines(dto.items),
+      lines,
       orderType: this.orderType(dto.type),
+      restaurantId: restaurant.id,
     });
 
     const discount = this.clampDiscount(dto.discount ?? 0, quote.subtotal);
@@ -84,9 +115,12 @@ export class PosService {
     const servedImmediately = dto.servedImmediately ?? true;
     const paid = dto.paid ?? true;
 
+    const lines = this.toLines(dto.items);
+    await this.assertNothingSoldOut(restaurant.id, lines);
+
     const created = await this.prisma.transaction(async (tx) => {
       const quote = await this.pricing.quote(
-        { lines: this.toLines(dto.items), orderType },
+        { lines, orderType, restaurantId: restaurant.id },
         tx,
       );
 

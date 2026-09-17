@@ -1,4 +1,4 @@
-import { OrderStatus, PaymentMethod, PaymentStatus } from '@prisma/client';
+import { OrderChannel, OrderStatus, PaymentMethod, PaymentStatus } from '@prisma/client';
 import { OrdersService } from './orders.service';
 
 /**
@@ -57,19 +57,25 @@ describe('Expiration des commandes impayées', () => {
       {} as never, // recipes
       {} as never, // config
       {} as never, // router
+      {} as never, // kitchens
     );
 
     return { service, prisma, tx, notifications };
   }
 
-  it('ne vise que les commandes en ligne, en attente, non payées, assez anciennes', async () => {
+  it('ne vise que les commandes en ligne, en attente ou confirmées, non payées, assez anciennes', async () => {
     const { service, prisma } = monter([]);
 
     await service.expireUnpaid(45);
 
     const appel = (prisma.order.findMany.mock.calls as unknown as Array<[{ where: Record<string, unknown> }]>)[0][0];
     const where = appel.where;
-    expect(where.status).toBe(OrderStatus.PENDING);
+    // Une vente au comptoir « à payer plus tard » n'attend aucun
+    // opérateur : elle ne doit jamais expirer pour cette raison.
+    expect(where.channel).toBe(OrderChannel.ONLINE);
+    // Confirmée sans paiement : un reliquat d'avant la garde, à fermer
+    // comme les autres plutôt qu'à laisser afficher « Confirmée ».
+    expect(where.status).toEqual({ in: [OrderStatus.PENDING, OrderStatus.CONFIRMED] });
     // Une commande en espèces n'attend aucun paiement : elle ne doit
     // jamais expirer pour cette raison.
     expect(where.paymentMethod).toEqual({ not: PaymentMethod.CASH_ON_DELIVERY });

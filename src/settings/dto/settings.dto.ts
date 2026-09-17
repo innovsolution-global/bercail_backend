@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
+import { VILLES, VILLE_INCONNUE } from '../../geo/referentiel';
 import {
   IsArray,
   IsBoolean,
@@ -98,10 +99,11 @@ export class UpdateRestaurantSettingsDto {
   @MaxLength(120)
   district?: string;
 
-  @ApiPropertyOptional()
+  /** Conakry, ou l'une des préfectures de Guinée — voir [[REGIONS]]. */
+  @ApiPropertyOptional({ enum: VILLES })
   @IsOptional()
   @IsString()
-  @MaxLength(120)
+  @IsIn(VILLES, { message: VILLE_INCONNUE })
   city?: string;
 
   @ApiPropertyOptional()

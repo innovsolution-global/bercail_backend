@@ -4,6 +4,7 @@ import { SyncStatus } from '@prisma/client';
 import { AuditService } from '../../audit/audit.service';
 import { TokenService } from '../../auth/token.service';
 import { PrismaService } from '../../database/prisma.service';
+import { DELIVERY_ACTIVE } from '../../deliveries/delivery-status';
 import { SettingsService } from '../../settings/settings.service';
 import { OrdersService } from '../../orders/orders.service';
 import { IdempotencyService } from '../services/idempotency.service';
@@ -69,18 +70,28 @@ export class MaintenanceService {
   }
 
   /**
-   * Un livreur qui n'a pas donné de nouvelles depuis 30 minutes est
+   * Un livreur qui n'a pas donné de nouvelles depuis cinq minutes est
    * repassé hors ligne : sans quoi le back-office lui attribuerait des
    * courses qu'il ne verrait jamais.
+   *
+   * Sa présence est celle de son application : elle se déclare à
+   * l'ouverture et bat toutes les minutes tant qu'elle est ouverte
+   * (voir `DriverPresence` côté mobile). Trente minutes, c'était le temps
+   * qu'un téléphone éteint restait « en ligne » au back-office.
+   *
+   * Un livreur en course est épargné : sa position, envoyée pendant la
+   * livraison, tient lieu de nouvelles — et un GPS qui décroche sous un
+   * toit ne doit pas le faire disparaître au milieu d'une livraison.
    */
-  @Cron(CronExpression.EVERY_10_MINUTES)
+  @Cron('*/2 * * * *')
   async releaseStaleDrivers(): Promise<void> {
-    const threshold = new Date(Date.now() - 30 * 60 * 1000);
+    const threshold = new Date(Date.now() - 5 * 60 * 1000);
 
     const result = await this.prisma.driverProfile.updateMany({
       where: {
         isOnline: true,
         OR: [{ lastSeenAt: { lt: threshold } }, { lastSeenAt: null }],
+        deliveries: { none: { status: { in: DELIVERY_ACTIVE } } },
       },
       data: { isOnline: false, isAvailable: false },
     });

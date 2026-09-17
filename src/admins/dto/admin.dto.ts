@@ -102,6 +102,20 @@ export class UpdateAdminDto {
   @MaxLength(60)
   firstName?: string;
 
+  /**
+   * L'identifiant de connexion.
+   *
+   * Le formulaire l'a toujours proposé ; le serveur le refusait, et le
+   * propriétaire voyait « le champ email n'est pas attendu ici » en
+   * voulant seulement changer des droits. Il se modifie donc, comme le
+   * téléphone — unique, et tracé.
+   */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Transform(normalizeEmail)
+  @IsEmail({}, { message: 'Adresse e-mail invalide.' })
+  email?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()

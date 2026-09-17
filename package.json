@@ -23,7 +23,8 @@
     "test:cov": "jest --coverage",
     "test:e2e": "jest --config ./test/jest-e2e.json --runInBand",
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
+    "prisma:migrate": "prisma migrate dev --create-only",
+    "prisma:apply": "prisma migrate deploy",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "prisma:reset": "prisma migrate reset --force",
@@ -34,7 +35,8 @@
     "db:setup": "prisma migrate deploy && npm run seed",
     "tunnel": "npx --yes localtunnel --port 3000 --subdomain ziza-local",
     "admins:verify": "ts-node --transpile-only scripts/admins-verify.ts",
-    "proximite:verify": "ts-node --transpile-only scripts/proximite-verify.ts"
+    "proximite:verify": "ts-node --transpile-only scripts/proximite-verify.ts",
+    "notes:recalculer": "ts-node --transpile-only scripts/notes-recalculer.ts"
   },
   "prisma": {
     "seed": "ts-node --transpile-only prisma/seed.ts"
@@ -59,6 +61,7 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
     "compression": "^1.7.5",
+    "firebase-admin": "^13.10.0",
     "helmet": "^8.0.0",
     "ioredis": "^5.4.1",
     "nodemailer": "^10.0.0",

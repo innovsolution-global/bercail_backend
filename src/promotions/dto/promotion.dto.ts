@@ -11,21 +11,12 @@ import {
   Matches,
   MaxLength,
   Min,
-  IsUUID,
 } from 'class-validator';
 import { PaginationQueryDto } from '../../common/dto/pagination.dto';
 
 export const PROMOTION_TYPES_WIRE = ['percentage', 'fixed', 'free_delivery'] as const;
 
 export class CreatePromotionDto {
-  @ApiPropertyOptional({
-    description:
-      'Établissement visé. Inutile pour un ADMIN — il écrit dans le sien ; obligatoire pour un SUPER_ADMIN, qui les voit tous.',
-  })
-  @IsOptional()
-  @IsUUID()
-  restaurantId?: string;
-
   @ApiProperty({ example: 'Bienvenue au Bercail' })
   @IsString()
   @IsNotEmpty()

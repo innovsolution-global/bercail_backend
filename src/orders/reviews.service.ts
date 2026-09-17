@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { OrderStatus, Prisma, Role } from '@prisma/client';
 import { AppException, ERROR_CODES } from '../common/exceptions/app.exception';
+import { displayedRating } from '../common/utils/rating.util';
 import type { AuthenticatedUser } from '../common/types/authenticated-user';
 import { PrismaService } from '../database/prisma.service';
 import type { CreateReviewDto } from './dto/review.dto';
@@ -14,6 +15,39 @@ export interface ReviewDto {
   comment: string | null;
   items: { orderItemId: string; menuItemId: string | null; name: string; rating: number }[];
   createdAt: string;
+}
+
+/** La dernière note d'un client sur un plat. */
+export interface DishRatingDto {
+  menuItemId: string;
+  rating: number;
+  orderId: string;
+  ratedAt: string;
+}
+
+/**
+ * Une note par plat : la plus récente, quand le client a commandé le même
+ * plat plusieurs fois. Les lignes arrivent de la plus récente à la plus
+ * ancienne.
+ */
+export function latestPerDish(
+  notes: {
+    menuItemId: string | null;
+    rating: number;
+    review: { orderId: string; createdAt: Date };
+  }[],
+): DishRatingDto[] {
+  const vues = new Map<string, DishRatingDto>();
+  for (const note of notes) {
+    if (!note.menuItemId || vues.has(note.menuItemId)) continue;
+    vues.set(note.menuItemId, {
+      menuItemId: note.menuItemId,
+      rating: note.rating,
+      orderId: note.review.orderId,
+      ratedAt: note.review.createdAt.toISOString(),
+    });
+  }
+  return [...vues.values()];
 }
 
 /**
@@ -151,7 +185,32 @@ export class ReviewsService {
     return this.toDto(review);
   }
 
+  /**
+   * Les plats que ce client a notés, avec sa dernière note pour chacun.
+   *
+   * C'est ce que la fiche d'un plat affiche sous « votre note » : elle
+   * l'affichait depuis la mémoire du téléphone, qui s'effaçait à la
+   * fermeture de l'application.
+   */
+  async myDishRatings(user: AuthenticatedUser): Promise<DishRatingDto[]> {
+    const notes = await this.prisma.orderItemReview.findMany({
+      where: { menuItemId: { not: null }, review: { customerId: user.id } },
+      orderBy: { review: { createdAt: 'desc' } },
+      select: {
+        menuItemId: true,
+        rating: true,
+        review: { select: { orderId: true, createdAt: true } },
+      },
+    });
+
+    return latestPerDish(notes);
+  }
+
   // ── Les moyennes, recalculées depuis la table des avis ──────────────
+  //
+  // La note enregistrée est celle qu'on **montre** : nulle tant que le
+  // seuil d'avis n'est pas atteint (voir [[displayedRating]]). Le premier
+  // client faisait afficher « 5,0 » partout comme une vérité établie.
 
   private async refreshRestaurant(tx: Prisma.TransactionClient, restaurantId: string) {
     const agg = await tx.orderReview.aggregate({
@@ -161,7 +220,10 @@ export class ReviewsService {
     });
     await tx.restaurant.update({
       where: { id: restaurantId },
-      data: { rating: this.round(agg._avg.restaurantRating), reviewCount: agg._count._all },
+      data: {
+        rating: displayedRating(agg._avg.restaurantRating, agg._count._all),
+        reviewCount: agg._count._all,
+      },
     });
   }
 
@@ -169,10 +231,11 @@ export class ReviewsService {
     const agg = await tx.orderReview.aggregate({
       where: { driverId, driverRating: { not: null } },
       _avg: { driverRating: true },
+      _count: { _all: true },
     });
     await tx.driverProfile.update({
       where: { id: driverId },
-      data: { rating: this.round(agg._avg.driverRating) },
+      data: { rating: displayedRating(agg._avg.driverRating, agg._count._all) },
     });
   }
 
@@ -184,13 +247,30 @@ export class ReviewsService {
     });
     await tx.menuItem.update({
       where: { id: menuItemId },
-      data: { rating: this.round(agg._avg.rating), reviewCount: agg._count._all },
+      data: {
+        rating: displayedRating(agg._avg.rating, agg._count._all),
+        reviewCount: agg._count._all,
+      },
     });
   }
 
-  /** Une décimale : « 4,3 », pas « 4,333333 ». */
-  private round(value: number | null): number | null {
-    return value === null ? null : Math.round(value * 10) / 10;
+  /**
+   * Recalcule toutes les notes depuis la table des avis.
+   *
+   * Pour appliquer le seuil aux notes déjà enregistrées, ou remettre
+   * d'aplomb une moyenne qui aurait dérivé.
+   */
+  async recomputeAll(): Promise<void> {
+    await this.prisma.transaction(async (tx) => {
+      const maisons = await tx.restaurant.findMany({ select: { id: true } });
+      for (const maison of maisons) await this.refreshRestaurant(tx, maison.id);
+
+      const livreurs = await tx.driverProfile.findMany({ select: { id: true } });
+      for (const livreur of livreurs) await this.refreshDriver(tx, livreur.id);
+
+      const plats = await tx.menuItem.findMany({ select: { id: true } });
+      for (const plat of plats) await this.refreshMenuItem(tx, plat.id);
+    });
   }
 
   private assertCanRead(user: AuthenticatedUser, customerId: string | null, driverId: string | null) {

@@ -10,9 +10,13 @@ import { restaurantContext } from '../common/context/restaurant-context';
  * cloisonné — les options d'un plat, les lignes d'un achat, l'historique
  * d'une commande.
  */
+/*
+ * La carte — catégories, plats, promotions — n'y figure plus : elle est
+ * **commune à toutes les maisons** depuis le 14 septembre 2026. Chaque
+ * maison garde en revanche son stock, ses achats, ses dépenses et son
+ * personnel, pour que les comptes restent séparés.
+ */
 const SCOPED_MODELS: ReadonlySet<string> = new Set([
-  'Category',
-  'MenuItem',
   'Supplier',
   'StockItem',
   'StockMovement',
@@ -20,10 +24,41 @@ const SCOPED_MODELS: ReadonlySet<string> = new Set([
   'Expense',
   'Income',
   'Employee',
-  'Promotion',
   'Order',
   'OpeningHour',
 ]);
+
+/**
+ * Modèles cloisonnés **par leur parent**.
+ *
+ * Une livraison n'a pas d'établissement : elle a une commande, qui en a
+ * un. Un livreur non plus : son compte en a un. Un paiement pareil. Le
+ * filtre passe donc par la relation — sans quoi le tableau de bord de
+ * Kipé comptait « 1 livraison en cours » pour une course partie de
+ * Kaloum, et la liste des livreurs mêlait les deux maisons.
+ *
+ * Seules les lectures filtrables sont couvertes : une lecture par clé
+ * unique ne peut pas porter de relation, et les services qui ouvrent une
+ * fiche vérifient déjà eux-mêmes l'établissement. Rien n'est posé à la
+ * création non plus : c'est le parent qui porte le rattachement.
+ */
+const SCOPED_THROUGH: Readonly<Record<string, (restaurantId: string) => Record<string, object>>> = {
+  Delivery: (restaurantId) => ({ order: { restaurantId } }),
+  Payment: (restaurantId) => ({ order: { restaurantId } }),
+  DriverProfile: (restaurantId) => ({ user: { restaurantId } }),
+};
+
+/** Ajoute le filtre de relation sans écraser ce que la requête y mettait déjà. */
+function throughRelation(
+  where: Record<string, unknown>,
+  relation: Record<string, object>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...where };
+  for (const [key, filter] of Object.entries(relation)) {
+    merged[key] = { ...((where[key] as object) ?? {}), ...filter };
+  }
+  return merged;
+}
 
 /** Lectures auxquelles on peut ajouter un filtre non unique. */
 const FILTERABLE_READS: ReadonlySet<string> = new Set([
@@ -81,14 +116,23 @@ export function withRestaurantScope<T extends object>(client: T): T {
           const restaurantId = restaurantContext.activeRestaurantId();
 
           // Hors requête, ou compte non cloisonné : rien à filtrer.
-          if (!restaurantId || !model || !SCOPED_MODELS.has(model)) {
-            return query(args);
+          if (!restaurantId || !model) return query(args);
+
+          const through = SCOPED_THROUGH[model];
+          if (through) {
+            if (!FILTERABLE_READS.has(operation)) return query(args);
+            return query({
+              ...(args ?? {}),
+              where: throughRelation((args?.where as Record<string, unknown>) ?? {}, through(restaurantId)),
+            });
           }
+
+          if (!SCOPED_MODELS.has(model)) return query(args);
 
           if (FILTERABLE_READS.has(operation)) {
             return query({
-              ...args,
-              where: { ...((args.where as object) ?? {}), restaurantId },
+              ...(args ?? {}),
+              where: { ...((args?.where as object) ?? {}), restaurantId },
             });
           }
 

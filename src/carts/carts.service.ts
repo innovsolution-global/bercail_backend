@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { OrderType } from '@prisma/client';
+import { DishAvailabilityService } from '../common/context/dish-availability.service';
+import { restaurantContext } from '../common/context/restaurant-context';
 import { AppException, ERROR_CODES } from '../common/exceptions/app.exception';
 import { PrismaService } from '../database/prisma.service';
+import { KitchenSelector } from '../orders/kitchen-selector.service';
 import { PricingService, type LineInput } from '../orders/pricing.service';
 import type { AddCartItemDto, CartQueryDto, UpdateCartItemDto } from './dto/cart.dto';
 
@@ -19,6 +22,8 @@ export class CartsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly pricing: PricingService,
+    private readonly availability: DishAvailabilityService,
+    private readonly kitchens: KitchenSelector,
   ) {}
 
   private async ensureCart(userId: string) {
@@ -54,6 +59,7 @@ export class CartsService {
         minimumOrder: 0,
         meetsMinimum: false,
         unavailableItems: [],
+        kitchen: null,
       };
     }
 
@@ -61,8 +67,48 @@ export class CartsService {
 
     // Un plat devenu indisponible ne doit pas bloquer l'affichage du
     // panier : on le signale, le client le retire lui-même.
-    const unavailable = items.filter((item) => !item.menuItem.isAvailable);
-    const priceable = items.filter((item) => item.menuItem.isAvailable);
+    //
+    // « Indisponible » : retiré de la carte, ou épuisé dans toutes les
+    // maisons. Épuisé dans une seule, il reste commandable — la commande
+    // partira d'une autre cuisine.
+    const epuisesPartout = new Set(
+      await this.availability.soldOutEverywhere(items.map((item) => item.menuItemId)),
+    );
+    const alaCarte = items.filter(
+      (item) => item.menuItem.isAvailable && !epuisesPartout.has(item.menuItemId),
+    );
+
+    /*
+     * Chez qui chiffrer.
+     *
+     * C'est ce panier que l'application montre au moment de payer : ses
+     * frais et son minimum doivent être ceux de la maison qui préparera.
+     * Si la maison qui sert le client n'a plus l'un des plats, la
+     * commande basculera ailleurs — le panier est donc chiffré là-bas,
+     * et le dit. Et quand aucune maison ne peut tout préparer, les plats
+     * qui manquent chez la plus proche sont signalés indisponibles : le
+     * client les retire, et le reste part de chez elle.
+     */
+    const choix =
+      alaCarte.length > 0
+        ? await this.kitchens.choose({
+            nearestId: null,
+            position: restaurantContext.current()?.position ?? null,
+            menuItemIds: alaCarte.map((item) => item.menuItemId),
+            orderType,
+          })
+        : null;
+
+    const manquants = new Set(choix && !choix.ok ? choix.soldOut.map((dish) => dish.id) : []);
+    const commandable = (item: (typeof items)[number]) =>
+      item.menuItem.isAvailable &&
+      !epuisesPartout.has(item.menuItemId) &&
+      !manquants.has(item.menuItemId);
+
+    const unavailable = items.filter((item) => !commandable(item));
+    const priceable = items.filter(commandable);
+
+    const cuisine = choix ? (choix.ok ? choix.restaurant : choix.nearest) : null;
 
     const quote =
       priceable.length > 0
@@ -76,6 +122,7 @@ export class CartsService {
             orderType,
             promotionCode: query.promotionCode ?? null,
             customerId: userId,
+            restaurantId: cuisine?.id,
           })
         : null;
 
@@ -94,7 +141,7 @@ export class CartsService {
           imageUrl: item.menuItem.imageUrl || null,
           quantity: item.quantity,
           note: item.note,
-          isAvailable: item.menuItem.isAvailable,
+          isAvailable: commandable(item),
           unitPrice: line?.unitPrice ?? 0,
           lineTotal: line?.lineTotal ?? 0,
           options:
@@ -121,6 +168,17 @@ export class CartsService {
         menuItemId: item.menuItemId,
         name: item.menuItem.name,
       })),
+      /** La maison qui préparera, et celle qui a passé la main, le cas échéant. */
+      kitchen: cuisine
+        ? {
+            id: cuisine.id,
+            name: cuisine.name,
+            divertedFrom:
+              choix?.ok && choix.divertedFrom
+                ? { id: choix.divertedFrom.id, name: choix.divertedFrom.name, soldOut: choix.divertedFrom.soldOut }
+                : null,
+          }
+        : null,
     };
   }
 
@@ -140,37 +198,21 @@ export class CartsService {
       customerId: userId,
     });
 
+    // Le moteur de prix ne connaît que l'interrupteur global ; un plat
+    // épuisé dans toutes les maisons n'est pas plus commandable.
+    if ((await this.availability.soldOutEverywhere([dto.menuItemId])).length > 0) {
+      throw AppException.conflict(
+        ERROR_CODES.MENU_ITEM_UNAVAILABLE,
+        'Ce plat est épuisé dans toutes nos maisons pour le moment.',
+        { menuItemId: dto.menuItemId },
+      );
+    }
+
     const cart = await this.ensureCart(userId);
     const optionIds = [...new Set(dto.optionIds ?? [])].sort();
 
-    /*
-     * **Un panier, une cuisine.**
-     *
-     * Un plat appartient à une carte, une carte à une maison : le panier
-     * qui en mélange deux ne peut être ni chiffré ni cuisiné. Cela
-     * n'arrive pas depuis l'écran — la carte servie est celle d'une
-     * seule maison — mais la carte peut changer entre deux ajouts, quand
-     * le client enregistre une adresse plus proche d'une autre maison.
-     * On le lui dit, avec les noms, plutôt que de le laisser découvrir
-     * un panier en erreur.
-     */
-    const dejaLa = await this.prisma.cartItem.findFirst({
-      where: { cartId: cart.id },
-      select: { menuItem: { select: { restaurantId: true, restaurant: { select: { name: true } } } } },
-    });
-    if (dejaLa) {
-      const nouveau = await this.prisma.menuItem.findUnique({
-        where: { id: dto.menuItemId },
-        select: { restaurantId: true, restaurant: { select: { name: true } } },
-      });
-      if (nouveau && nouveau.restaurantId !== dejaLa.menuItem.restaurantId) {
-        throw AppException.conflict(
-          ERROR_CODES.CONFLICT,
-          `Votre panier contient des plats de « ${dejaLa.menuItem.restaurant.name} ». ` +
-            `Videz-le pour commander chez « ${nouveau.restaurant.name} ».`,
-        );
-      }
-    }
+    // Plus de contrôle « un panier, une cuisine » : la carte est commune à
+    // toutes les maisons, un panier ne peut donc plus en mélanger deux.
 
     const existing = await this.prisma.cartItem.findMany({
       where: { cartId: cart.id, menuItemId: dto.menuItemId },

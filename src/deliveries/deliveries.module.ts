@@ -4,6 +4,7 @@ import {
   DeliveriesController,
   DriverDeliveriesController,
   OrderAssignmentController,
+  OrderDriverLocationController,
 } from './deliveries.controller';
 import { DeliveriesService } from './deliveries.service';
 import { DriverAssignmentService } from './driver-assignment.service';
@@ -14,6 +15,7 @@ import { DriverAssignmentService } from './driver-assignment.service';
     DeliveriesController,
     OrderAssignmentController,
     DriverDeliveriesController,
+    OrderDriverLocationController,
   ],
   providers: [DeliveriesService, DriverAssignmentService,],
   exports: [DeliveriesService, DriverAssignmentService,],

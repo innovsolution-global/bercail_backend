@@ -73,67 +73,9 @@ async function main() {
       });
     }
 
-    // Une copie de la carte : chaque maison a la sienne.
-    const categories = await prisma.category.findMany({
-      where: { restaurantId: kaloum.id, deletedAt: null },
-      include: {
-        menuItems: {
-          where: { deletedAt: null },
-          include: { optionGroups: { include: { options: true } } },
-        },
-      },
-    });
-    for (const cat of categories) {
-      const nouvelle = await prisma.category.create({
-        data: {
-          restaurantId: kipe.id,
-          name: cat.name,
-          slug: cat.slug,
-          emoji: cat.emoji,
-          description: cat.description,
-          imageUrl: cat.imageUrl,
-          sortOrder: cat.sortOrder,
-          isActive: cat.isActive,
-        },
-      });
-      for (const item of cat.menuItems) {
-        await prisma.menuItem.create({
-          data: {
-            restaurantId: kipe.id,
-            categoryId: nouvelle.id,
-            name: item.name,
-            shortDescription: item.shortDescription,
-            description: item.description,
-            price: item.price,
-            promoPrice: item.promoPrice,
-            imageUrl: item.imageUrl,
-            ingredients: item.ingredients,
-            isAvailable: item.isAvailable,
-            isPopular: item.isPopular,
-            isSuggestion: item.isSuggestion,
-            isSpicy: item.isSpicy,
-            preparationMinutes: item.preparationMinutes,
-            optionGroups: {
-              create: item.optionGroups.map((g) => ({
-                name: g.name,
-                isRequired: g.isRequired,
-                minSelect: g.minSelect,
-                maxSelect: g.maxSelect,
-                sortOrder: g.sortOrder,
-                options: {
-                  create: g.options.map((o) => ({
-                    name: o.name,
-                    extraPrice: o.extraPrice,
-                    isAvailable: o.isAvailable,
-                  })),
-                },
-              })),
-            },
-          },
-        });
-      }
-    }
-    console.log('Kipé recréé :', kipe.id, '—', categories.length, 'catégories copiées');
+    // Plus de copie de la carte : depuis le 14 septembre 2026 elle est
+    // commune à toutes les maisons.
+    console.log('Kipé recréé :', kipe.id);
   } else {
     console.log('Kipé existe déjà');
   }
