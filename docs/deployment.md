@@ -12,8 +12,12 @@ Toute la configuration passe par des variables d'environnement — voir
 | `DATABASE_URL`       | PostgreSQL 14+                                          |
 | `JWT_ACCESS_SECRET`  | ≥ 32 caractères, différent du refresh                   |
 | `JWT_REFRESH_SECRET` | ≥ 32 caractères                                         |
-| `REDIS_URL`          | Redis 7+                                                |
 | `CORS_ORIGINS`       | Origines exactes, jamais `*`                            |
+
+`REDIS_URL` n'est **pas** bloquante : sans elle, l'API démarre et le signale
+dans ses journaux. Le cache est alors désactivé et la limitation de débit
+devient propre à chaque instance — acceptable sur une instance unique, à
+corriger dès qu'il y en a plusieurs.
 
 L'application **refuse de démarrer** si un secret manque, est trop court, ou
 est resté à sa valeur d'exemple. Mieux vaut un crash au boot qu'une API signée

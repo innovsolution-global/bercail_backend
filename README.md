@@ -91,7 +91,7 @@ npm run dev          # ou npm run start:dev
 | WebSocket      | ws://localhost:3000/realtime       |
 | Santé          | http://localhost:3000/health       |
 
-> Redis est facultatif en développement : sans lui, l'API démarre en mode
+> Redis est facultatif (en développement comme en production) : sans lui, l'API démarre en mode
 > dégradé (pas de cache, limitation de débit locale) et le signale dans les
 > logs. La base PostgreSQL, elle, est indispensable.
 

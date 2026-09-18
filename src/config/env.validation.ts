@@ -6,13 +6,30 @@
  * boot qu'une API signée avec « dev-access-secret-change-me ».
  */
 
+/** Sans l'une de ces variables, l'API ne peut rien servir de correct. */
 const REQUIRED_IN_PRODUCTION = [
   'DATABASE_URL',
   'JWT_ACCESS_SECRET',
   'JWT_REFRESH_SECRET',
-  'REDIS_URL',
   'CORS_ORIGINS',
 ] as const;
+
+/**
+ * Souhaitables, mais pas bloquantes.
+ *
+ * `REDIS_URL` était exigée ici, ce qui contredisait le reste du code :
+ * `RedisService` est écrit pour fonctionner sans Redis (cache désactivé,
+ * compteurs de débit locaux). Refuser de démarrer pour une dépendance que
+ * l'application sait faire sans, c'est empêcher une mise en ligne qui
+ * aurait parfaitement fonctionné. On avertit, on ne bloque plus.
+ */
+const RECOMMENDED_IN_PRODUCTION: { key: string; consequence: string }[] = [
+  {
+    key: 'REDIS_URL',
+    consequence:
+      "cache désactivé, limitation de débit propre à chaque instance et temps réel limité à une seule instance. À renseigner dès que l'API tourne en plusieurs exemplaires.",
+  },
+];
 
 const FORBIDDEN_PRODUCTION_VALUES = [
   'dev-access-secret-change-me',
@@ -30,6 +47,14 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
       const value = config[key];
       if (!value || String(value).trim() === '') {
         errors.push(`${key} est obligatoire en production.`);
+      }
+    }
+
+    for (const { key, consequence } of RECOMMENDED_IN_PRODUCTION) {
+      const value = config[key];
+      if (!value || String(value).trim() === '') {
+        // Visible dans les journaux de démarrage de l'hébergeur.
+        console.warn(`[config] ${key} n'est pas renseignée : ${consequence}`);
       }
     }
 
