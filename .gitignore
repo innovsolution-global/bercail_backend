@@ -7,8 +7,10 @@ coverage/
 *.log
 npm-debug.log*
 .DS_Store
-uploads/
-storage/
+# Fichiers televerses (pilote local) — a la racine uniquement :
+# sans la barre initiale, la regle excluait aussi src/storage/.
+/uploads/
+/storage/
 .tsbuildinfo
 *.tsbuildinfo
 .idea/
