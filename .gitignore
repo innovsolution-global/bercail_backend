@@ -21,3 +21,6 @@ backups/
 
 # Clé privée du compte de service Firebase : pleins pouvoirs sur le projet.
 firebase-service-account.json
+
+# Variables de production préparées pour Render : contient des secrets.
+render.env
